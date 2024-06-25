@@ -6,13 +6,26 @@ pub const Command = union(enum) {
     simple: Simple,
 };
 
+/// A command consisting only of words, variables, and redirections
+///     echo "hello world"
 pub const Simple = struct {
     arguments: []const Argument,
+    redirections: []const Redirection,
 };
 
 pub const Argument = struct {
     tag: Token.Tag,
     val: []const u8,
+};
+
+pub const Redirection = struct {
+    source: union(enum) {
+        arg: Argument,
+        heredoc: []const u8,
+    },
+    /// The fd of the command that is affected (could be either redirecting in or out)
+    fd: std.posix.fd_t,
+    truncate: bool,
 };
 
 const Parser = struct {
@@ -38,8 +51,10 @@ const Parser = struct {
         return self.tokens[self.index];
     }
 
+    /// parses a simple command
     fn parseSimple(self: *Parser) !void {
         var args = std.ArrayList(Argument).init(self.allocator);
+        var redirs = std.ArrayList(Redirection).init(self.allocator);
         while (self.nextToken()) |token| {
             switch (token.tag) {
                 .word,
@@ -48,10 +63,50 @@ const Parser = struct {
                 .variable_string,
                 .variable_init,
                 => try args.append(.{ .tag = token.tag, .val = self.tokenContent(token.loc) }),
+                .l_angle => {
+                    // const heredoc: bool = blk: {
+                    //     if (self.peekToken() == .l_angle) {
+                    //         _ = self.nextToken();
+                    //         break :blk true;
+                    //     }
+                    //     break :blk false;
+                    // };
+                    // _ = heredoc;
+                },
+                .r_angle => {
+                    const truncate: bool = blk: {
+                        const tk = self.peekToken() orelse return error.SyntaxError;
+                        if (tk.tag == .r_angle) {
+                            _ = self.nextToken();
+                            break :blk false;
+                        }
+                        break :blk true;
+                    };
+                    const source = blk: while (self.nextToken()) |token2| {
+                        switch (token2.tag) {
+                            .wsp => continue,
+                            .word,
+                            .variable,
+                            .variable_count,
+                            .variable_string,
+                            .variable_init,
+                            => break :blk token2,
+                            else => return error.SyntaxError,
+                        }
+                    } else return error.SyntaxError;
+                    std.log.debug("source: {s}", .{self.tokenContent(source.loc)});
+                    try redirs.append(.{
+                        .source = .{ .arg = .{ .tag = source.tag, .val = self.tokenContent(source.loc) } },
+                        .fd = std.posix.STDOUT_FILENO,
+                        .truncate = truncate,
+                    });
+                },
                 else => {},
             }
         }
-        try self.commands.append(.{ .simple = .{ .arguments = args.items } });
+        try self.commands.append(.{
+            .simple = .{ .arguments = args.items, .redirections = redirs.items },
+        });
     }
 };
 
