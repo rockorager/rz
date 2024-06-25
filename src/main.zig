@@ -1,6 +1,6 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
-const rz = @import("rz.zig");
+const Rz = @import("Rz.zig");
 
 const log = std.log.scoped(.rz);
 
@@ -45,7 +45,7 @@ pub fn main() !void {
     }
     const allocator = gpa.allocator();
 
-    var shell = try rz.Shell.init(allocator);
+    var rz = try Rz.init(allocator);
 
     var map = try std.process.getEnvMap(allocator);
     var iter = map.iterator();
@@ -53,8 +53,8 @@ pub fn main() !void {
         log.debug("{s}={s}", .{ v.key_ptr.*, v.value_ptr.* });
     }
     defer map.deinit();
-    defer shell.deinit();
-    try shell.run();
+    defer rz.deinit();
+    try rz.run();
 }
 
 test "simple test" {
