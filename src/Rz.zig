@@ -16,17 +16,11 @@ const Event = union(enum) {
 };
 
 allocator: std.mem.Allocator,
-// arena allocator for parsing
-arena: std.heap.ArenaAllocator,
 vx: vaxis.Vaxis,
 tty: vaxis.Tty,
-writer: std.io.BufferedWriter(4096, std.io.AnyWriter),
 env: std.process.EnvMap,
 
 pub fn init(allocator: std.mem.Allocator) !Rz {
-    // Initalize a tty
-    const tty = try vaxis.Tty.init();
-
     var env = try std.process.getEnvMap(allocator);
     // ifs=(' ' \t \n)
     try env.put("ifs", " \x01\t\x01\n");
@@ -47,10 +41,8 @@ pub fn init(allocator: std.mem.Allocator) !Rz {
 
     return .{
         .allocator = allocator,
-        .arena = std.heap.ArenaAllocator.init(allocator),
         .vx = try vaxis.init(allocator, .{ .kitty_keyboard_flags = .{ .report_events = true } }),
-        .tty = tty,
-        .writer = tty.bufferedWriter(),
+        .tty = try vaxis.Tty.init(),
         .env = env,
     };
 }
@@ -58,7 +50,6 @@ pub fn init(allocator: std.mem.Allocator) !Rz {
 pub fn deinit(self: *Rz) void {
     self.vx.deinit(self.allocator, self.tty.anyWriter());
     self.tty.deinit();
-    self.arena.deinit();
     self.env.deinit();
 }
 
@@ -78,6 +69,11 @@ pub fn run(self: *Rz) !void {
     defer zedit.deinit();
     try zedit.buf.ensureTotalCapacity(256);
 
+    // arena allocator for parsing
+    var arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
     while (true) {
         const event = loop.nextEvent();
         switch (event) {
@@ -85,35 +81,48 @@ pub fn run(self: *Rz) !void {
                 if (key.matches('c', .{ .ctrl = true })) {
                     break;
                 } else if (key.matches(vaxis.Key.enter, .{})) {
-                    try self.tty.anyWriter().writeAll("\r\n");
+                    _ = arena.reset(.retain_capacity);
                     loop.stop();
+                    try self.tty.anyWriter().writeAll("\r\n");
+                    try self.tty.anyWriter().writeAll(vaxis.ctlseqs.hide_cursor);
                     const fd = try std.posix.dup(self.tty.fd);
                     self.exec(zedit.buf.items) catch |err| {
                         log.err("rz: {}", .{err});
                     };
+                    try self.tty.anyWriter().writeAll(vaxis.ctlseqs.hide_cursor);
                     zedit.clearRetainingCapacity();
                     try std.posix.dup2(fd, std.posix.STDOUT_FILENO);
                     self.tty.fd = fd;
-                    self.writer = self.tty.bufferedWriter();
                     try makeRaw(self.tty);
                     try loop.start();
                 } else {
                     try zedit.update(.{ .key_press = key });
-                    const cmds = ast.parse(zedit.buf.items, self.arena.allocator()) catch break :blk;
+                    const cmds = ast.parse(zedit.buf.items, allocator) catch break :blk;
                     _ = cmds;
                 }
             },
 
-            .winsize => |ws| try self.vx.resize(self.allocator, self.tty.anyWriter(), ws),
+            .winsize => |ws| {
+                if (ws.cols != self.vx.screen.width or ws.rows != self.vx.screen.width) {
+                    try self.vx.resize(self.allocator, self.tty.anyWriter(), ws);
+                    var buf: [8]u8 = undefined;
+                    const rows = try std.fmt.bufPrint(&buf, "{d}", .{ws.rows});
+                    try self.env.put("LINES", rows);
+                    const cols = try std.fmt.bufPrint(&buf, "{d}", .{ws.cols});
+                    try self.env.put("COLUMNS", cols);
+                }
+            },
             else => {},
         }
 
         const win = self.vx.window();
         win.clear();
+        win.hideCursor();
         zedit.draw(win);
 
-        try self.vx.render(self.writer.writer().any());
-        try self.writer.flush();
+        var writer = self.tty.bufferedWriter();
+        try self.vx.render(writer.writer().any());
+        try writer.flush();
     }
 }
 
@@ -122,8 +131,7 @@ fn exec(self: *Rz, src: []const u8) !void {
     defer arena.deinit();
     const allocator = arena.allocator();
     resetTty(self.tty);
-    _ = self.arena.reset(.retain_capacity);
-    const cmds = try ast.parse(src, self.arena.allocator());
+    const cmds = try ast.parse(src, allocator);
     for (cmds) |cmd| {
         switch (cmd) {
             .simple => |simple| try self.execSimple(allocator, simple),

@@ -35,6 +35,7 @@ var log_file: std.fs.File = undefined;
 pub fn main() !void {
     log_file = try std.fs.cwd().createFile("rz.log", .{ .truncate = true });
     defer log_file.close();
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
         const deinit_status = gpa.deinit();
@@ -58,6 +59,8 @@ pub fn main() !void {
 }
 
 test "simple test" {
+    _ = @import("ast.zig");
     _ = @import("lex.zig");
     _ = @import("Line.zig");
+    _ = @import("Rz.zig");
 }
