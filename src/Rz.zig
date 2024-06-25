@@ -19,6 +19,7 @@ allocator: std.mem.Allocator,
 vx: vaxis.Vaxis,
 tty: vaxis.Tty,
 env: std.process.EnvMap,
+exit: ?u8 = null,
 
 pub fn init(allocator: std.mem.Allocator) !Rz {
     var env = try std.process.getEnvMap(allocator);
@@ -53,7 +54,7 @@ pub fn deinit(self: *Rz) void {
     self.env.deinit();
 }
 
-pub fn run(self: *Rz) !void {
+pub fn run(self: *Rz) !u8 {
     var loop: vaxis.Loop(Event) = .{
         .vaxis = &self.vx,
         .tty = &self.tty,
@@ -74,6 +75,9 @@ pub fn run(self: *Rz) !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    var writer = self.tty.bufferedWriter();
+    const any = writer.writer().any();
+
     while (true) {
         const event = loop.nextEvent();
         switch (event) {
@@ -83,18 +87,31 @@ pub fn run(self: *Rz) !void {
                 } else if (key.matches(vaxis.Key.enter, .{})) {
                     _ = arena.reset(.retain_capacity);
                     loop.stop();
-                    try self.tty.anyWriter().writeAll("\r\n");
-                    try self.tty.anyWriter().writeAll(vaxis.ctlseqs.hide_cursor);
+
+                    try any.writeAll("\r\n");
+                    if (self.vx.caps.kitty_keyboard)
+                        try any.writeAll(vaxis.ctlseqs.csi_u_pop);
+                    try writer.flush();
                     const fd = try std.posix.dup(self.tty.fd);
                     self.exec(zedit.buf.items) catch |err| {
                         log.err("rz: {}", .{err});
                     };
-                    try self.tty.anyWriter().writeAll(vaxis.ctlseqs.hide_cursor);
+                    try any.writeAll(vaxis.ctlseqs.hide_cursor);
+                    if (self.vx.caps.kitty_keyboard) {
+                        const flags: vaxis.Key.KittyFlags = .{ .report_events = true };
+                        const flag_int: u5 = @bitCast(flags);
+                        try any.print(vaxis.ctlseqs.csi_u_push, .{flag_int});
+                    }
                     zedit.clearRetainingCapacity();
                     try std.posix.dup2(fd, std.posix.STDOUT_FILENO);
                     self.tty.fd = fd;
+                    try writer.flush();
                     try makeRaw(self.tty);
                     try loop.start();
+
+                    // we check exit condition after restarting loop so we can properly clean up
+                    // vaxis
+                    if (self.exit) |exit| return exit;
                 } else {
                     try zedit.update(.{ .key_press = key });
                     const cmds = ast.parse(zedit.buf.items, allocator) catch break :blk;
@@ -120,10 +137,11 @@ pub fn run(self: *Rz) !void {
         win.hideCursor();
         zedit.draw(win);
 
-        var writer = self.tty.bufferedWriter();
-        try self.vx.render(writer.writer().any());
+        try self.vx.render(any);
         try writer.flush();
     }
+
+    return 0;
 }
 
 fn exec(self: *Rz, src: []const u8) !void {
@@ -168,6 +186,8 @@ fn execSimple(self: *Rz, allocator: std.mem.Allocator, simple: ast.Simple) !void
         }
     }
 
+    if (args.items.len == 0) return;
+
     for (simple.redirections) |redir| {
         switch (redir.fd) {
             std.posix.STDIN_FILENO => {},
@@ -195,9 +215,23 @@ fn execSimple(self: *Rz, allocator: std.mem.Allocator, simple: ast.Simple) !void
         }
     }
 
+    if (try self.execBuiltin(args.items)) return;
+
     var process = std.process.Child.init(args.items, allocator);
     process.env_map = &self.env;
     _ = try process.spawnAndWait();
+}
+
+fn execBuiltin(self: *Rz, args: []const []const u8) !bool {
+    std.debug.assert(args.len > 0);
+    if (std.mem.eql(u8, "exit", args[0])) {
+        if (args.len > 1)
+            self.exit = try std.fmt.parseUnsigned(u8, args[1], 10)
+        else
+            self.exit = 0;
+        return true;
+    }
+    return false;
 }
 
 fn resetTty(tty: vaxis.Tty) void {

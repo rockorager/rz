@@ -32,7 +32,7 @@ pub fn logFn(
 
 var log_file: std.fs.File = undefined;
 
-pub fn main() !void {
+pub fn main() !u8 {
     log_file = try std.fs.cwd().createFile("rz.log", .{ .truncate = true });
     defer log_file.close();
 
@@ -55,7 +55,7 @@ pub fn main() !void {
     }
     defer map.deinit();
     defer rz.deinit();
-    try rz.run();
+    return rz.run();
 }
 
 test "simple test" {
