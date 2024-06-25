@@ -26,6 +26,13 @@ prev_cursor_idx: usize = 0,
 
 unicode: *const Unicode,
 
+prompt: struct {
+    left: ?[]vaxis.Segment = null,
+    right: ?[]vaxis.Segment = null,
+    top_left: ?[]vaxis.Segment = null,
+    top_right: ?[]vaxis.Segment = null,
+} = .{},
+
 pub fn init(alloc: std.mem.Allocator, unicode: *const Unicode) Line {
     return .{
         .buf = std.ArrayList(u8).init(alloc),
@@ -102,14 +109,25 @@ fn widthToCursor(self: *Line, win: Window) usize {
 pub fn draw(self: *Line, win: Window) void {
     if (win.width == 0) return;
 
-    self.prev_cursor_idx = self.cursor_idx;
-    self.prev_cursor_col = 0;
-
-    // assumption!! the gap is never within a grapheme
-    // one way to _ensure_ this is to move the gap... but that's a cost we probably don't want to pay.
-    var first_iter = self.unicode.graphemeIterator(self.buf.items);
     var col: usize = 0;
     var row: usize = 0;
+
+    if (self.prompt.left) |prompt| {
+        const result = try win.print(prompt, .{ .wrap = .grapheme });
+        col = result.col;
+        row = result.row;
+    } else {
+        const default_prompt: vaxis.Segment = .{ .text = "> " };
+        const result = try win.printSegment(default_prompt, .{ .wrap = .grapheme });
+        col = result.col;
+        row = result.row;
+    }
+
+    self.prev_cursor_idx = self.cursor_idx;
+    self.prev_cursor_col = col;
+    self.prev_cursor_row = row;
+
+    var first_iter = self.unicode.graphemeIterator(self.buf.items);
     var i: usize = 0;
     while (first_iter.next()) |grapheme| {
         const g = grapheme.bytes(self.buf.items);
