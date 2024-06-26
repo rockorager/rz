@@ -2,6 +2,8 @@ const std = @import("std");
 const lex = @import("lex.zig");
 const Token = lex.Token;
 
+const log = std.log.scoped(.rz);
+
 pub const Command = union(enum) {
     simple: Simple,
     function: Function,
@@ -56,11 +58,14 @@ pub fn parse(src: []const u8, arena: std.mem.Allocator) ![]Command {
     while (parser.peekToken()) |token| {
         switch (token.tag) {
             .eof => break,
-            .wsp => continue,
-            .comment => continue,
+            .wsp => parser.index += 1,
+            .comment => parser.index += 1,
             .word => try parser.parseSimple(),
             .keyword_fn => try parser.parseFn(),
-            else => {},
+            else => {
+                log.debug("unhandled first token: {}", .{token.tag});
+                parser.index += 1;
+            },
         }
     }
 
@@ -133,19 +138,22 @@ const Parser = struct {
                             else => return error.SyntaxError,
                         }
                     } else return error.SyntaxError;
-                    std.log.debug("source: {s}", .{self.tokenContent(source.loc)});
                     try redirs.append(.{
                         .source = .{ .arg = .{ .tag = source.tag, .val = self.tokenContent(source.loc) } },
                         .fd = std.posix.STDOUT_FILENO,
                         .truncate = truncate,
                     });
                 },
+                .semicolon,
+                .newline,
+                => break,
                 else => {},
             }
         }
-        try self.commands.append(.{
-            .simple = .{ .arguments = args.items, .redirections = redirs.items },
-        });
+        if (args.items.len > 0)
+            try self.commands.append(.{
+                .simple = .{ .arguments = args.items, .redirections = redirs.items },
+            });
     }
 
     fn parseFn(self: *Parser) !void {
@@ -172,7 +180,6 @@ const Parser = struct {
             }
             if (count == 0) break tok.loc.start;
         } else return error.SyntaxError;
-        std.log.err("{s}", .{self.src[start..end]});
         try self.commands.append(.{ .function = .{ .name = name, .body = self.src[start..end] } });
     }
 

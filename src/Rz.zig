@@ -56,6 +56,53 @@ pub fn deinit(self: *Rz) void {
 }
 
 pub fn run(self: *Rz) !u8 {
+    var writer = self.tty.bufferedWriter();
+    const any = writer.writer().any();
+
+    // Load config files
+    {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        var files = try std.ArrayList([]const u8).initCapacity(arena.allocator(), 8);
+        try files.append("/etc/rz/config.rz");
+        if (self.env.get("XDG_DATA_DIRS")) |dirs| {
+            var iter = std.mem.splitScalar(u8, dirs, ':');
+            while (iter.next()) |dir| {
+                const path = try std.fs.path.join(arena.allocator(), &.{ dir, "rz/config.rz" });
+                try files.append(path);
+            }
+        }
+        if (self.env.get("XDG_CONFIG_HOME")) |dir| {
+            const path = try std.fs.path.join(arena.allocator(), &.{ dir, "rz/config.rz" });
+            try files.append(path);
+        } else if (self.env.get("HOME")) |dir| {
+            const path = try std.fs.path.join(arena.allocator(), &.{ dir, ".config/rz/config.rz" });
+            try files.append(path);
+        }
+
+        for (files.items) |path| {
+            log.debug("trying config at {s}", .{path});
+            const file = std.fs.openFileAbsolute(
+                path,
+                .{ .mode = .read_only },
+            ) catch continue;
+            const src = try file.readToEndAlloc(self.allocator, 1_000_000);
+            defer self.allocator.free(src);
+            const fd = try std.posix.dup(self.tty.fd);
+            self.exec(src) catch |err| {
+                switch (err) {
+                    error.FileNotFound => try any.print("rz: command not found\r\n", .{}),
+                    std.mem.Allocator.Error.OutOfMemory => try any.print("rz: out of memory\r\n", .{}),
+
+                    // TODO: Print to stdout at the location of the error everywhere in exec
+                    else => try any.print("rz: unexpected error: {}\r\n", .{err}),
+                }
+            };
+            try std.posix.dup2(fd, std.posix.STDOUT_FILENO);
+            self.tty.fd = fd;
+            try makeRaw(self.tty);
+        }
+    }
     var loop: vaxis.Loop(Event) = .{
         .vaxis = &self.vx,
         .tty = &self.tty,
@@ -75,9 +122,6 @@ pub fn run(self: *Rz) !u8 {
     var arena = std.heap.ArenaAllocator.init(self.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-
-    var writer = self.tty.bufferedWriter();
-    const any = writer.writer().any();
 
     while (true) {
         const event = loop.nextEvent();
@@ -127,14 +171,14 @@ pub fn run(self: *Rz) !u8 {
             },
 
             .winsize => |ws| {
-                if (ws.cols != self.vx.screen.width or ws.rows != self.vx.screen.width) {
-                    try self.vx.resize(self.allocator, self.tty.anyWriter(), ws);
-                    var buf: [8]u8 = undefined;
-                    const rows = try std.fmt.bufPrint(&buf, "{d}", .{ws.rows});
-                    try self.env.put("LINES", rows);
-                    const cols = try std.fmt.bufPrint(&buf, "{d}", .{ws.cols});
-                    try self.env.put("COLUMNS", cols);
-                }
+                // if (ws.cols != self.vx.screen.width or ws.rows != self.vx.screen.height) {
+                try self.vx.resize(self.allocator, self.tty.anyWriter(), ws);
+                var buf: [8]u8 = undefined;
+                const rows = try std.fmt.bufPrint(&buf, "{d}", .{ws.rows});
+                try self.env.put("LINES", rows);
+                const cols = try std.fmt.bufPrint(&buf, "{d}", .{ws.cols});
+                try self.env.put("COLUMNS", cols);
+                // }
             },
             else => {},
         }
