@@ -21,6 +21,7 @@ vx: vaxis.Vaxis,
 tty: vaxis.Tty,
 env: std.process.EnvMap,
 exit: ?u8 = null,
+callstack: std.ArrayList([]const u8),
 
 pub fn init(allocator: std.mem.Allocator) !Rz {
     var env = try std.process.getEnvMap(allocator);
@@ -46,6 +47,7 @@ pub fn init(allocator: std.mem.Allocator) !Rz {
         .vx = try vaxis.init(allocator, .{ .kitty_keyboard_flags = .{ .report_events = true } }),
         .tty = try vaxis.Tty.init(),
         .env = env,
+        .callstack = std.ArrayList([]const u8).init(allocator),
     };
 }
 
@@ -147,6 +149,7 @@ pub fn run(self: *Rz) !u8 {
                             else => try any.print("rz: unexpected error: {}\r\n", .{err}),
                         }
                     };
+                    self.callstack.clearAndFree();
                     try any.writeAll(vaxis.ctlseqs.hide_cursor);
                     if (self.vx.caps.kitty_keyboard) {
                         const flags: vaxis.Key.KittyFlags = .{ .report_events = true };
@@ -209,11 +212,53 @@ fn exec(self: *Rz, src: []const u8) !void {
                 const key = try std.fmt.bufPrint(&buf, "fn#{s}", .{func.name});
                 try self.env.put(key, func.body);
             },
+            .assignment => |assignment| try self.execAssignment(allocator, assignment),
+        }
+        if (self.callstack.items.len > 0 and self.exit != null) {
+            self.setStatus(self.exit.?);
+            self.exit = null;
+            return;
         }
     }
 }
 
+fn execAssignment(self: *Rz, allocator: std.mem.Allocator, cmd: ast.Assignment) !void {
+    switch (cmd.value.tag) {
+        .word => try self.env.put(cmd.key, cmd.value.val),
+        .variable => {
+            if (self.env.get(cmd.value.val)) |val| {
+                try self.env.put(cmd.key, val);
+            }
+        },
+        .variable_string => {
+            if (self.env.get(cmd.value.val)) |val| {
+                const val2 = try allocator.dupe(u8, val);
+                std.mem.replaceScalar(u8, val2, '\x01', ' ');
+                try self.env.put(cmd.key, val2);
+            } else try self.env.put(cmd.key, "");
+        },
+        .variable_count => {
+            if (self.env.get(cmd.value.val)) |val| {
+                const n = std.mem.count(u8, val, "\x01");
+                var buf: [8]u8 = undefined;
+                const val2 = try std.fmt.bufPrint(&buf, "{d}", .{n});
+                try self.env.put(cmd.key, val2);
+            } else try self.env.put(cmd.key, "0");
+        },
+        else => unreachable,
+    }
+}
+
 fn execSimple(self: *Rz, allocator: std.mem.Allocator, simple: ast.Simple) !void {
+    for (simple.assignments) |assignment| {
+        try self.execAssignment(allocator, assignment);
+    }
+    defer {
+        for (simple.assignments) |assignment| {
+            self.env.remove(assignment.key);
+        }
+    }
+
     var args = try std.ArrayList([]const u8).initCapacity(allocator, simple.arguments.len);
     for (simple.arguments) |arg| {
         switch (arg.tag) {
@@ -238,7 +283,17 @@ fn execSimple(self: *Rz, allocator: std.mem.Allocator, simple: ast.Simple) !void
                     try args.append(val2);
                 } else try args.append("0");
             },
+            .equal => try args.append("="),
             else => {},
+        }
+        if (arg.concatenate) blk: {
+            const last = args.popOrNull() orelse break :blk;
+            const penultimate = args.popOrNull() orelse {
+                try args.append(last);
+                break :blk;
+            };
+            const result = try std.mem.concat(allocator, u8, &.{ penultimate, last });
+            try args.append(result);
         }
     }
 
@@ -275,15 +330,38 @@ fn execSimple(self: *Rz, allocator: std.mem.Allocator, simple: ast.Simple) !void
         if (self.execBuiltin(args.items[1..])) return;
         var process = std.process.Child.init(args.items[1..], allocator);
         process.env_map = &self.env;
-        _ = try process.spawnAndWait();
+        const exit = try process.spawnAndWait();
+        switch (exit) {
+            .Exited => |val| self.setStatus(val),
+            else => {},
+        }
     } else {
+        for (self.callstack.items) |item| {
+            if (std.mem.eql(u8, item, args.items[0])) {
+                try self.tty.anyWriter().print(
+                    "rz: function '{s}' called recursively. Consider using `builtin {s}`",
+                    .{ item, item },
+                );
+                return error.InfiniteLoop;
+            }
+        }
         if (self.execFunction(args.items)) return;
         if (self.execBuiltin(args.items)) return;
 
         var process = std.process.Child.init(args.items, allocator);
         process.env_map = &self.env;
-        _ = try process.spawnAndWait();
+        const exit = try process.spawnAndWait();
+        switch (exit) {
+            .Exited => |val| self.setStatus(val),
+            else => {},
+        }
     }
+}
+
+fn setStatus(self: *Rz, status: u8) void {
+    var buf: [8]u8 = undefined;
+    const str = std.fmt.bufPrint(&buf, "{d}", .{status}) catch return;
+    self.env.put("status", str) catch return;
 }
 
 fn execBuiltin(self: *Rz, args: []const []const u8) bool {
@@ -304,8 +382,10 @@ fn execFunction(self: *Rz, args: []const []const u8) bool {
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "fn#{s}", .{args[0]}) catch return false;
     if (self.env.get(key)) |val| {
+        self.callstack.append(args[0]) catch {};
         self.exec(val) catch {
-            return false;
+            self.tty.anyWriter().writeAll("\r\n") catch {};
+            return true;
         };
         return true;
     }
