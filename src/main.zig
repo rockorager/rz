@@ -48,12 +48,6 @@ pub fn main() !u8 {
 
     var rz = try Rz.init(allocator);
 
-    var map = try std.process.getEnvMap(allocator);
-    var iter = map.iterator();
-    while (iter.next()) |v| {
-        log.debug("{s}={s}", .{ v.key_ptr.*, v.value_ptr.* });
-    }
-    defer map.deinit();
     defer rz.deinit();
     return rz.run();
 }

@@ -27,6 +27,9 @@ pub fn init(allocator: std.mem.Allocator) !Rz {
     var env = try std.process.getEnvMap(allocator);
     // ifs=(' ' \t \n)
     try env.put("ifs", " \x01\t\x01\n");
+    try env.put("nl", "\n");
+    try env.put("tab", "\t");
+    try env.put("prompt", "> \x01\x01\x01");
     if (env.get("HOME")) |home| {
         try env.put("home", home);
     }
@@ -159,9 +162,12 @@ pub fn run(self: *Rz) !u8 {
                     zedit.clearRetainingCapacity();
                     try std.posix.dup2(fd, std.posix.STDOUT_FILENO);
                     self.tty.fd = fd;
-                    try writer.flush();
                     try makeRaw(self.tty);
                     try loop.start();
+                    const win = self.vx.window();
+                    win.clear();
+                    try self.vx.render(any);
+                    try writer.flush();
 
                     // we check exit condition after restarting loop so we can properly clean up
                     // vaxis
@@ -174,14 +180,14 @@ pub fn run(self: *Rz) !u8 {
             },
 
             .winsize => |ws| {
-                // if (ws.cols != self.vx.screen.width or ws.rows != self.vx.screen.height) {
-                try self.vx.resize(self.allocator, self.tty.anyWriter(), ws);
-                var buf: [8]u8 = undefined;
-                const rows = try std.fmt.bufPrint(&buf, "{d}", .{ws.rows});
-                try self.env.put("LINES", rows);
-                const cols = try std.fmt.bufPrint(&buf, "{d}", .{ws.cols});
-                try self.env.put("COLUMNS", cols);
-                // }
+                if (ws.cols != self.vx.screen.width or ws.rows != self.vx.screen.height) {
+                    try self.vx.resize(self.allocator, self.tty.anyWriter(), ws);
+                    var buf: [8]u8 = undefined;
+                    const rows = try std.fmt.bufPrint(&buf, "{d}", .{ws.rows});
+                    try self.env.put("LINES", rows);
+                    const cols = try std.fmt.bufPrint(&buf, "{d}", .{ws.cols});
+                    try self.env.put("COLUMNS", cols);
+                }
             },
             else => {},
         }
@@ -327,7 +333,7 @@ fn execSimple(self: *Rz, allocator: std.mem.Allocator, simple: ast.Simple) !void
     }
 
     if (std.mem.eql(u8, "builtin", args.items[0])) {
-        if (self.execBuiltin(args.items[1..])) return;
+        if (self.execBuiltin(allocator, args.items[1..])) return;
         var process = std.process.Child.init(args.items[1..], allocator);
         process.env_map = &self.env;
         const exit = try process.spawnAndWait();
@@ -346,7 +352,7 @@ fn execSimple(self: *Rz, allocator: std.mem.Allocator, simple: ast.Simple) !void
             }
         }
         if (self.execFunction(args.items)) return;
-        if (self.execBuiltin(args.items)) return;
+        if (self.execBuiltin(allocator, args.items)) return;
 
         var process = std.process.Child.init(args.items, allocator);
         process.env_map = &self.env;
@@ -364,8 +370,44 @@ fn setStatus(self: *Rz, status: u8) void {
     self.env.put("status", str) catch return;
 }
 
-fn execBuiltin(self: *Rz, args: []const []const u8) bool {
+fn execBuiltin(self: *Rz, allocator: std.mem.Allocator, args: []const []const u8) bool {
     assert(args.len > 0);
+    if (std.mem.eql(u8, "cd", args[0])) {
+        if (args.len == 1) {
+            if (self.env.get("home")) |home| {
+                std.process.changeCurDir(home) catch return true;
+            }
+            return true;
+        }
+        if (args[1][0] == '/') {
+            std.process.changeCurDir(args[1]) catch return true;
+            return true;
+        }
+        var components = std.ArrayList([]const u8).init(allocator);
+        // we add a / because path.join doesn't return an absolute path
+        components.append("/") catch return true;
+        const cwd = std.process.getCwdAlloc(allocator) catch return true;
+        var iter = std.mem.splitScalar(u8, cwd, '/');
+        while (iter.next()) |v| {
+            if (v.len == 0) continue;
+            components.append(v) catch return true;
+        }
+        iter = std.mem.splitScalar(u8, args[1], '/');
+        while (iter.next()) |p| {
+            if (std.mem.eql(u8, "..", p)) {
+                components.items.len -|= 1;
+                continue;
+            }
+            components.append(p) catch return true;
+        }
+
+        const path = std.fs.path.join(allocator, components.items) catch return true;
+        std.process.changeCurDir(path) catch |err| {
+            log.err("cd: couldn't change directory: {}", .{err});
+            return true;
+        };
+        return true;
+    }
     if (std.mem.eql(u8, "exit", args[0])) {
         if (args.len > 1)
             self.exit = std.fmt.parseUnsigned(u8, args[1], 10) catch return false
