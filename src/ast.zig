@@ -4,6 +4,7 @@ const Token = lex.Token;
 
 pub const Command = union(enum) {
     simple: Simple,
+    function: Function,
 };
 
 /// A command consisting only of words, variables, and redirections
@@ -11,6 +12,11 @@ pub const Command = union(enum) {
 pub const Simple = struct {
     arguments: []const Argument,
     redirections: []const Redirection,
+};
+
+pub const Function = struct {
+    name: []const u8,
+    body: []const u8,
 };
 
 pub const Argument = struct {
@@ -27,6 +33,39 @@ pub const Redirection = struct {
     fd: std.posix.fd_t,
     truncate: bool,
 };
+
+/// Parses src into a sequence of commands. Allocations are not tracked. Use an arena!
+pub fn parse(src: []const u8, arena: std.mem.Allocator) ![]Command {
+    var lexer = lex.Tokenizer.init(src);
+
+    // We init capacity to 4:1 ratio. Because maybe median token is is 4 long?
+    var tokens = try std.ArrayList(Token).initCapacity(arena, src.len / 4);
+    // Consume all the tokens
+    while (true) {
+        const token = lexer.next();
+        try tokens.append(token);
+        if (token.tag == .eof) break;
+    }
+
+    var parser: Parser = .{
+        .allocator = arena,
+        .tokens = tokens.items,
+        .commands = try std.ArrayList(Command).initCapacity(arena, 1),
+        .src = src,
+    };
+    while (parser.peekToken()) |token| {
+        switch (token.tag) {
+            .eof => break,
+            .wsp => continue,
+            .comment => continue,
+            .word => try parser.parseSimple(),
+            .keyword_fn => try parser.parseFn(),
+            else => {},
+        }
+    }
+
+    return parser.commands.items;
+}
 
 const Parser = struct {
     src: []const u8,
@@ -108,36 +147,47 @@ const Parser = struct {
             .simple = .{ .arguments = args.items, .redirections = redirs.items },
         });
     }
-};
 
-/// Parses src into a sequence of commands. Allocations are not tracked. Use an arena!
-pub fn parse(src: []const u8, arena: std.mem.Allocator) ![]Command {
-    var lexer = lex.Tokenizer.init(src);
+    fn parseFn(self: *Parser) !void {
+        // first token is 'fn'
+        _ = self.nextToken() orelse unreachable;
 
-    // We init capacity to 4:1 ratio. Because maybe median token is is 4 long?
-    var tokens = try std.ArrayList(Token).initCapacity(arena, src.len / 4);
-    // Consume all the tokens
-    while (true) {
-        const token = lexer.next();
-        try tokens.append(token);
-        if (token.tag == .eof) break;
+        _ = try self.want(.wsp);
+
+        const name_tok = self.nextToken() orelse return error.SyntaxError;
+        if (name_tok.tag != .word) return error.SyntaxError;
+        const name = self.tokenContent(name_tok.loc);
+
+        self.eat(.wsp);
+
+        const opening_bracket = try self.want(.l_bracket);
+        const start = opening_bracket.loc.end;
+
+        var count: usize = 1;
+        const end: usize = while (self.nextToken()) |tok| {
+            switch (tok.tag) {
+                .l_bracket => count += 1,
+                .r_bracket => count -= 1,
+                else => continue,
+            }
+            if (count == 0) break tok.loc.start;
+        } else return error.SyntaxError;
+        std.log.err("{s}", .{self.src[start..end]});
+        try self.commands.append(.{ .function = .{ .name = name, .body = self.src[start..end] } });
     }
 
-    var parser: Parser = .{
-        .allocator = arena,
-        .tokens = tokens.items,
-        .commands = try std.ArrayList(Command).initCapacity(arena, 1),
-        .src = src,
-    };
-    while (parser.peekToken()) |token| {
-        switch (token.tag) {
-            .eof => break,
-            .wsp => continue,
-            .comment => continue,
-            .word => try parser.parseSimple(),
-            else => {},
+    fn want(self: *Parser, tag: Token.Tag) !Token {
+        const tok = self.nextToken() orelse return error.SyntaxError;
+        if (tok.tag != tag) return error.SyntaxError;
+        return tok;
+    }
+
+    fn eat(self: *Parser, tag: Token.Tag) void {
+        while (self.peekToken()) |tok| {
+            if (tok.tag == tag)
+                self.index += 1
+            else
+                return;
         }
     }
-
-    return parser.commands.items;
-}
+};

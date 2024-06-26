@@ -1,6 +1,7 @@
 const Rz = @This();
 
 const std = @import("std");
+const assert = std.debug.assert;
 const vaxis = @import("vaxis");
 const ast = @import("ast.zig");
 
@@ -94,7 +95,13 @@ pub fn run(self: *Rz) !u8 {
                     try writer.flush();
                     const fd = try std.posix.dup(self.tty.fd);
                     self.exec(zedit.buf.items) catch |err| {
-                        log.err("rz: {}", .{err});
+                        switch (err) {
+                            error.FileNotFound => try any.print("rz: command not found\r\n", .{}),
+                            std.mem.Allocator.Error.OutOfMemory => try any.print("rz: out of memory\r\n", .{}),
+
+                            // TODO: Print to stdout at the location of the error everywhere in exec
+                            else => try any.print("rz: unexpected error: {}\r\n", .{err}),
+                        }
                     };
                     try any.writeAll(vaxis.ctlseqs.hide_cursor);
                     if (self.vx.caps.kitty_keyboard) {
@@ -153,6 +160,11 @@ fn exec(self: *Rz, src: []const u8) !void {
     for (cmds) |cmd| {
         switch (cmd) {
             .simple => |simple| try self.execSimple(allocator, simple),
+            .function => |func| {
+                var buf: [256]u8 = undefined;
+                const key = try std.fmt.bufPrint(&buf, "fn#{s}", .{func.name});
+                try self.env.put(key, func.body);
+            },
         }
     }
 }
@@ -215,20 +227,42 @@ fn execSimple(self: *Rz, allocator: std.mem.Allocator, simple: ast.Simple) !void
         }
     }
 
-    if (try self.execBuiltin(args.items)) return;
+    if (std.mem.eql(u8, "builtin", args.items[0])) {
+        if (self.execBuiltin(args.items[1..])) return;
+        var process = std.process.Child.init(args.items[1..], allocator);
+        process.env_map = &self.env;
+        _ = try process.spawnAndWait();
+    } else {
+        if (self.execFunction(args.items)) return;
+        if (self.execBuiltin(args.items)) return;
 
-    var process = std.process.Child.init(args.items, allocator);
-    process.env_map = &self.env;
-    _ = try process.spawnAndWait();
+        var process = std.process.Child.init(args.items, allocator);
+        process.env_map = &self.env;
+        _ = try process.spawnAndWait();
+    }
 }
 
-fn execBuiltin(self: *Rz, args: []const []const u8) !bool {
-    std.debug.assert(args.len > 0);
+fn execBuiltin(self: *Rz, args: []const []const u8) bool {
+    assert(args.len > 0);
     if (std.mem.eql(u8, "exit", args[0])) {
         if (args.len > 1)
-            self.exit = try std.fmt.parseUnsigned(u8, args[1], 10)
+            self.exit = std.fmt.parseUnsigned(u8, args[1], 10) catch return false
         else
             self.exit = 0;
+        return true;
+    }
+    return false;
+}
+
+fn execFunction(self: *Rz, args: []const []const u8) bool {
+    assert(args.len > 0);
+
+    var buf: [256]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "fn#{s}", .{args[0]}) catch return false;
+    if (self.env.get(key)) |val| {
+        self.exec(val) catch {
+            return false;
+        };
         return true;
     }
     return false;
