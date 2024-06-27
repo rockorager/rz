@@ -144,50 +144,24 @@ const Parser = struct {
             .variable,
             .variable_count,
             .variable_string,
+            .equal,
             => {
                 var arg: Argument = switch (first.tag) {
                     .word => .{ .word = self.tokenContent(first.loc) },
                     .variable => .{ .variable = self.tokenContent(first.loc) },
                     .variable_count => .{ .variable_count = self.tokenContent(first.loc) },
                     .variable_string => .{ .variable_string = self.tokenContent(first.loc) },
+                    .equal => .{ .word = self.tokenContent(first.loc) },
                     else => unreachable,
                 };
                 // We do this in a loop because we could have multiple concats
                 // ie a^b^c
-                var tag: Token.Tag = first.tag;
-                while (self.freeCaret(tag)) {
-                    var next = self.nextToken() orelse unreachable;
-                    tag = next.tag;
-                    // word followed by any of these results in a concat
-                    // if (self.freeCaret(.word))
-                    // var next = self.maybeAny(&.{
-                    //     .word,
-                    //     .quoted_word,
-                    //     .variable,
-                    //     .variable_count,
-                    //     .variable_string,
-                    //     .caret,
-                    //     .equal,
-                    // }) orelse return arg;
-
+                while (self.freeCaret(arg)) {
                     const lhs = try self.allocator.create(Argument);
                     lhs.* = arg;
 
                     const rhs = try self.allocator.create(Argument);
-                    rhs.* = switch (next.tag) {
-                        .caret => blk: {
-                            next = self.nextToken() orelse return error.SyntaxError;
-                            switch (next.tag) {
-                                .word => break :blk .{ .word = self.tokenContent(next.loc) },
-                                .quoted_word => break :blk .{ .quoted_word = self.tokenContent(next.loc) },
-                                .variable => break :blk .{ .variable = self.tokenContent(next.loc) },
-                                .variable_count => break :blk .{ .variable_count = self.tokenContent(next.loc) },
-                                .variable_string => break :blk .{ .variable_string = self.tokenContent(next.loc) },
-                                else => return error.SyntaxError,
-                            }
-                        },
-                        else => self.tokenToArgument(next),
-                    };
+                    rhs.* = try self.nextArgument() orelse return error.SyntaxError;
                     arg = .{ .concatenate = .{ .lhs = lhs, .rhs = rhs } };
                 }
                 return arg;
@@ -399,12 +373,11 @@ const Parser = struct {
     }
 
     /// Returns true when a free caret should be inserted
-    fn freeCaret(self: *Parser, cur: Token.Tag) bool {
+    fn freeCaret(self: *Parser, cur: Argument) bool {
         self.eat(.caret);
         const next = self.peekToken() orelse return false;
         switch (cur) {
             .word,
-            .equal,
             => switch (next.tag) {
                 .word => return true,
                 .quoted_word => return true,
@@ -493,13 +466,13 @@ test "local assignment with arg containing '='" {
             .arguments = &.{
                 .{ .word = "baz" },
                 .{ .concatenate = .{
-                    .lhs = &.{
+                    .lhs = &.{ .word = "--foo" },
+                    .rhs = &.{
                         .concatenate = .{
-                            .lhs = &.{ .word = "--foo" },
-                            .rhs = &.{ .word = "=" },
+                            .lhs = &.{ .word = "=" },
+                            .rhs = &.{ .word = "bar" },
                         },
                     },
-                    .rhs = &.{ .word = "bar" },
                 } },
             },
             .redirections = &.{},
@@ -566,13 +539,13 @@ test "nested implicit concat" {
         .arguments = &.{
             .{
                 .concatenate = .{
-                    .lhs = &.{
+                    .lhs = &.{ .word = "foo" },
+                    .rhs = &.{
                         .concatenate = .{
-                            .lhs = &.{ .word = "foo" },
-                            .rhs = &.{ .variable = "bar" },
+                            .lhs = &.{ .variable = "bar" },
+                            .rhs = &.{ .word = ".c" },
                         },
                     },
-                    .rhs = &.{ .word = ".c" },
                 },
             },
         },
@@ -593,13 +566,13 @@ test "nested explicit concat" {
         .arguments = &.{
             .{
                 .concatenate = .{
-                    .lhs = &.{
+                    .lhs = &.{ .word = "foo" },
+                    .rhs = &.{
                         .concatenate = .{
-                            .lhs = &.{ .word = "foo" },
-                            .rhs = &.{ .variable = "bar" },
+                            .lhs = &.{ .variable = "bar" },
+                            .rhs = &.{ .word = ".c" },
                         },
                     },
-                    .rhs = &.{ .word = ".c" },
                 },
             },
         },
