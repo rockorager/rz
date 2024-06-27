@@ -148,6 +148,7 @@ const Parser = struct {
         const first = self.nextToken() orelse return null;
         switch (first.tag) {
             .word,
+            .quoted_word,
             .variable,
             .variable_count,
             .variable_string,
@@ -155,6 +156,7 @@ const Parser = struct {
             => {
                 const arg: Argument = switch (first.tag) {
                     .word => .{ .word = self.tokenContent(first.loc) },
+                    .quoted_word => .{ .quoted_word = self.tokenContent(first.loc) },
                     .variable => blk: {
                         if (self.peekToken()) |token| {
                             switch (token.tag) {
@@ -409,6 +411,7 @@ const Parser = struct {
         const next = self.peekToken() orelse return false;
         switch (cur) {
             .word,
+            .quoted_word,
             => switch (next.tag) {
                 .word => return true,
                 .quoted_word => return true,

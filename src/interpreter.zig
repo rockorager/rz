@@ -76,7 +76,13 @@ const Interpreter = struct {
         var result = std.ArrayList([]const u8).init(self.arena);
         switch (arg) {
             .word => |word| try result.append(word),
-            .quoted_word => {},
+            .quoted_word => |qw| {
+                // we must have at least 2 bytes for this to be a valid quoted word
+                if (qw.len < 2) return result.items;
+                const unquoted = qw[1 .. qw.len - 1];
+                const buf = try std.mem.replaceOwned(u8, self.arena, unquoted, "''", "'");
+                try result.append(buf);
+            },
             .variable => |v| {
                 const val = self.env.get(v) orelse return result.items;
                 var iter = std.mem.splitScalar(u8, val, '\x01');
@@ -168,6 +174,21 @@ test "resolve arguments" {
         const result = try interp.resolveArg(.{ .word = "foo" });
         try testing.expectEqual(1, result.len);
         try testing.expectEqualStrings("foo", result[0]);
+    }
+    {
+        const result = try interp.resolveArg(.{ .quoted_word = "'foo'" });
+        try testing.expectEqual(1, result.len);
+        try testing.expectEqualStrings("foo", result[0]);
+    }
+    {
+        const result = try interp.resolveArg(.{ .quoted_word = "'fo''o'" });
+        try testing.expectEqual(1, result.len);
+        try testing.expectEqualStrings("fo'o", result[0]);
+    }
+    {
+        const result = try interp.resolveArg(.{ .quoted_word = "''''" });
+        try testing.expectEqual(1, result.len);
+        try testing.expectEqualStrings("'", result[0]);
     }
     {
         const result = try interp.resolveArg(.{ .variable = "foo" });
