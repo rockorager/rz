@@ -17,6 +17,10 @@ pub const Argument = union(enum) {
     variable: []const u8,
     variable_count: []const u8,
     variable_string: []const u8,
+    variable_subscript: struct {
+        key: []const u8,
+        fields: *const Argument,
+    },
     concatenate: struct {
         lhs: *const Argument,
         rhs: *const Argument,
@@ -47,6 +51,9 @@ pub const Argument = union(enum) {
             .variable => |variable| try writer.print("${s}", .{variable}),
             .variable_count => |variable| try writer.print("$#{s}", .{variable}),
             .variable_string => |variable| try writer.print("$\"{s}", .{variable}),
+            .variable_subscript => |variable| {
+                try writer.print("${s}{}", .{ variable.key, variable.fields });
+            },
         }
     }
 };
@@ -103,7 +110,7 @@ pub fn parse(src: []const u8, arena: std.mem.Allocator) ![]Command {
             .eof => break,
             .wsp => parser.index += 1,
             .comment => parser.index += 1,
-            .word => try parser.parseSimple(),
+            .word, .variable => try parser.parseSimple(),
             .keyword_fn => try parser.parseFn(),
             else => {
                 log.debug("unhandled first token: {}", .{token.tag});
@@ -148,7 +155,24 @@ const Parser = struct {
             => {
                 const arg: Argument = switch (first.tag) {
                     .word => .{ .word = self.tokenContent(first.loc) },
-                    .variable => .{ .variable = self.tokenContent(first.loc) },
+                    .variable => blk: {
+                        if (self.peekToken()) |token| {
+                            switch (token.tag) {
+                                .l_paren => {
+                                    const fields = try self.nextArgument() orelse return error.SyntaxError;
+                                    const arg = try self.allocator.create(Argument);
+                                    arg.* = fields;
+                                    break :blk .{ .variable_subscript = .{
+                                        .key = self.tokenContent(first.loc),
+                                        .fields = arg,
+                                    } };
+                                },
+                                else => {},
+                            }
+                        }
+
+                        break :blk .{ .variable = self.tokenContent(first.loc) };
+                    },
                     .variable_count => .{ .variable_count = self.tokenContent(first.loc) },
                     .variable_string => .{ .variable_string = self.tokenContent(first.loc) },
                     .equal => .{ .word = self.tokenContent(first.loc) },
@@ -669,6 +693,34 @@ test "list concatenate" {
                     },
                 },
             } },
+        },
+        .redirections = &.{},
+        .assignments = &.{},
+    } };
+    const cmds = try parse(cmdline, allocator);
+    try testing.expectEqual(1, cmds.len);
+    try testing.expectEqualDeep(expect, cmds[0]);
+}
+
+test "variable subscript" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const cmdline = "$foo(1 2 3)";
+    const expect: Command = .{ .simple = .{
+        .arguments = &.{
+            .{
+                .variable_subscript = .{
+                    .key = "foo",
+                    .fields = &.{
+                        .list = &.{
+                            .{ .word = "1" },
+                            .{ .word = "2" },
+                            .{ .word = "3" },
+                        },
+                    },
+                },
+            },
         },
         .redirections = &.{},
         .assignments = &.{},

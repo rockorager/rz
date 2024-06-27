@@ -54,6 +54,7 @@ pub fn main() !u8 {
 
 test "simple test" {
     _ = @import("ast.zig");
+    _ = @import("interpreter.zig");
     _ = @import("lex.zig");
     _ = @import("Line.zig");
     _ = @import("Rz.zig");
