@@ -237,20 +237,10 @@ const Parser = struct {
                 self.index = start_index;
                 break;
             };
-            const rhs = self.wantAny(&.{
-                .word,
-                .variable,
-                .variable_string,
-                .variable_count,
-                .quoted_word,
-            }) catch {
-                self.index = start_index;
-                break;
-            };
-            const arg = self.tokenToArgument(rhs);
+            const rhs = try self.nextArgument() orelse break;
             try locals.append(.{
                 .key = self.tokenContent(lhs.loc),
-                .value = arg,
+                .value = rhs,
             });
             self.eat(.wsp);
         }
