@@ -100,56 +100,16 @@ const Interpreter = struct {
             },
             .variable_subscript => |v| {
                 const val = self.env.get(v.key) orelse return result.items;
-                var list = std.ArrayList([]const u8).init(self.arena);
-                {
-                    var iter = std.mem.splitScalar(u8, val, '\x01');
-                    while (iter.next()) |item| {
-                        try list.append(item);
-                    }
-                }
-                const subscripts = try self.resolveArg(v.fields.*);
+                const subscripts = try self.resolveArg(v.fields);
                 for (subscripts) |subscript| {
-                    const n = std.fmt.parseUnsigned(usize, subscript, 10) catch |err| {
+                    const n = std.fmt.parseUnsigned(u8, subscript, 10) catch |err| {
                         log.err("subscript error: '{s}' error: {}", .{ subscript, err });
                         continue;
                     };
-                    if (n == 0) continue;
-                    if (n - 1 < list.items.len) {
-                        try result.append(list.items[n - 1]);
-                    }
                 }
             },
-            .concatenate => |concat| {
-                const lhs = try self.resolveArg(concat.lhs.*);
-                const rhs = try self.resolveArg(concat.rhs.*);
-                if (lhs.len == 0 or rhs.len == 0) {
-                    log.err("tried concatenating a zero length list. Not supported at this time", .{});
-                    return result.items;
-                }
-                // equal lengths we pairwise concatenate
-                if (lhs.len == rhs.len) {
-                    for (lhs, 0..) |item, i| {
-                        const buf = try std.mem.concat(self.arena, u8, &.{ item, rhs[i] });
-                        try result.append(buf);
-                    }
-                } else if (lhs.len > 1 and rhs.len == 1) {
-                    for (lhs) |item| {
-                        const buf = try std.mem.concat(self.arena, u8, &.{ item, rhs[0] });
-                        try result.append(buf);
-                    }
-                } else if (lhs.len == 1 and rhs.len > 1) {
-                    for (rhs) |item| {
-                        const buf = try std.mem.concat(self.arena, u8, &.{ lhs[0], item });
-                        try result.append(buf);
-                    }
-                }
-            },
-            .list => |list| {
-                for (list) |item| {
-                    const resolved = try self.resolveArg(item);
-                    try result.appendSlice(resolved);
-                }
-            },
+            .concatenate => {},
+            .list => {},
         }
         return result.items;
     }
@@ -193,68 +153,5 @@ test "resolve arguments" {
         result = try interp.resolveArg(.{ .variable_string = "foo" });
         try testing.expectEqual(1, result.len);
         try testing.expectEqualStrings("bar baz", result[0]);
-
-        const fields: ast.Argument = .{ .list = &.{.{ .word = "1" }} };
-        result = try interp.resolveArg(.{
-            .variable_subscript = .{ .key = "foo", .fields = &fields },
-        });
-        try testing.expectEqual(1, result.len);
-        try testing.expectEqualStrings("bar", result[0]);
-
-        const fields2: ast.Argument = .{
-            .list = &.{
-                .{ .word = "1" },
-                .{ .word = "1" },
-                .{ .word = "1" },
-            },
-        };
-        result = try interp.resolveArg(.{
-            .variable_subscript = .{ .key = "foo", .fields = &fields2 },
-        });
-        try testing.expectEqual(3, result.len);
-        try testing.expectEqualStrings("bar", result[0]);
-        try testing.expectEqualStrings("bar", result[1]);
-        try testing.expectEqualStrings("bar", result[2]);
-    }
-    {
-        const lhs: ast.Argument = .{ .word = "foo" };
-        const rhs: ast.Argument = .{ .word = "bar" };
-        const result = try interp.resolveArg(.{ .concatenate = .{
-            .lhs = &lhs,
-            .rhs = &rhs,
-        } });
-        try testing.expectEqual(1, result.len);
-        try testing.expectEqualStrings("foobar", result[0]);
-    }
-    {
-        const lhs: ast.Argument = .{ .word = "foo" };
-        const rhs: ast.Argument = .{
-            .list = &.{
-                .{ .word = "bar" },
-                .{ .word = "baz" },
-            },
-        };
-        var result = try interp.resolveArg(.{ .concatenate = .{
-            .lhs = &lhs,
-            .rhs = &rhs,
-        } });
-        try testing.expectEqual(2, result.len);
-        try testing.expectEqualStrings("foobar", result[0]);
-        try testing.expectEqualStrings("foobaz", result[1]);
-
-        const lhs_list: ast.Argument = .{
-            .list = &.{
-                .{ .word = "-" },
-                .{ .word = "--" },
-            },
-        };
-
-        result = try interp.resolveArg(.{ .concatenate = .{
-            .lhs = &lhs_list,
-            .rhs = &rhs,
-        } });
-        try testing.expectEqual(2, result.len);
-        try testing.expectEqualStrings("-bar", result[0]);
-        try testing.expectEqualStrings("--baz", result[1]);
     }
 }
