@@ -37,7 +37,6 @@ pub const Token = struct {
         variable, // '$' followed by [A-Za-z0-9_]
         variable_count,
         variable_string,
-        variable_init,
         ampersand, // &
         ampersand_ampersand, // &&
         l_paren, // (
@@ -151,7 +150,7 @@ pub const Tokenizer = struct {
                         self.consumeByte();
                     },
                     '*' => {
-                        token.tag = .variable_init;
+                        token.tag = .variable;
                         token.loc.start += 1;
                         self.consumeByte();
                     },
