@@ -146,7 +146,7 @@ const Parser = struct {
             .variable_string,
             .equal,
             => {
-                var arg: Argument = switch (first.tag) {
+                const arg: Argument = switch (first.tag) {
                     .word => .{ .word = self.tokenContent(first.loc) },
                     .variable => .{ .variable = self.tokenContent(first.loc) },
                     .variable_count => .{ .variable_count = self.tokenContent(first.loc) },
@@ -154,17 +154,8 @@ const Parser = struct {
                     .equal => .{ .word = self.tokenContent(first.loc) },
                     else => unreachable,
                 };
-                // We do this in a loop because we could have multiple concats
-                // ie a^b^c
-                while (self.freeCaret(arg)) {
-                    const lhs = try self.allocator.create(Argument);
-                    lhs.* = arg;
-
-                    const rhs = try self.allocator.create(Argument);
-                    rhs.* = try self.nextArgument() orelse return error.SyntaxError;
-                    arg = .{ .concatenate = .{ .lhs = lhs, .rhs = rhs } };
-                }
-                return arg;
+                const final = try self.checkConcat(arg);
+                return final;
             },
             .l_paren => {
                 var list = std.ArrayList(Argument).init(self.allocator);
@@ -174,9 +165,8 @@ const Parser = struct {
                         .eof => return error.SyntaxError,
                         .r_paren => {
                             self.index += 1;
-                            // Check for concatenation
-                            // var next = self.maybeAny(&.{.caret}) orelse return arg;
-                            return .{ .list = list.items };
+                            const final = try self.checkConcat(.{ .list = list.items });
+                            return final;
                         },
                         else => {
                             const next = try self.nextArgument() orelse return error.SyntaxError;
@@ -240,6 +230,7 @@ const Parser = struct {
                     try args.append(arg);
                 },
                 .l_angle => {
+                    @panic("TODO");
                     // const heredoc: bool = blk: {
                     //     if (self.peekToken() == .l_angle) {
                     //         _ = self.nextToken();
@@ -279,7 +270,10 @@ const Parser = struct {
                 .newline,
                 .eof,
                 => break,
-                else => {},
+                else => {
+                    log.warn("unhandled token: {}", .{token});
+                    self.index += 1;
+                },
             }
         }
 
@@ -372,6 +366,19 @@ const Parser = struct {
         }
     }
 
+    fn checkConcat(self: *Parser, arg: Argument) anyerror!Argument {
+        var local = arg;
+        while (self.freeCaret(local)) {
+            const lhs = try self.allocator.create(Argument);
+            lhs.* = arg;
+
+            const rhs = try self.allocator.create(Argument);
+            rhs.* = try self.nextArgument() orelse unreachable;
+            local = .{ .concatenate = .{ .lhs = lhs, .rhs = rhs } };
+        }
+        return local;
+    }
+
     /// Returns true when a free caret should be inserted
     fn freeCaret(self: *Parser, cur: Argument) bool {
         self.eat(.caret);
@@ -401,6 +408,10 @@ const Parser = struct {
                 .equal => return true,
                 .l_paren => return false,
                 .caret => unreachable,
+                else => return false,
+            },
+            .list => switch (next.tag) {
+                .l_paren => return true,
                 else => return false,
             },
             else => return false,
@@ -636,33 +647,33 @@ test "word list with args and concat" {
     try testing.expectEqualDeep(expect, cmds[0]);
 }
 
-// test "list concatenate" {
-//     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-//     defer arena.deinit();
-//     const allocator = arena.allocator();
-//     const cmdline = "echo (foo bar)^(baz bam)";
-//     const expect: Command = .{ .simple = .{
-//         .arguments = &.{
-//             .{ .word = "echo" },
-//             .{ .concatenate = .{
-//                 .lhs = &.{
-//                     .list = &.{
-//                         .{ .word = "foo" },
-//                         .{ .word = "bar" },
-//                     },
-//                 },
-//                 .rhs = &.{
-//                     .list = &.{
-//                         .{ .word = "baz" },
-//                         .{ .word = "bam" },
-//                     },
-//                 },
-//             } },
-//         },
-//         .redirections = &.{},
-//         .assignments = &.{},
-//     } };
-//     const cmds = try parse(cmdline, allocator);
-//     try testing.expectEqual(1, cmds.len);
-//     try testing.expectEqualDeep(expect, cmds[0]);
-// }
+test "list concatenate" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const cmdline = "echo (foo bar)^(baz bam)";
+    const expect: Command = .{ .simple = .{
+        .arguments = &.{
+            .{ .word = "echo" },
+            .{ .concatenate = .{
+                .lhs = &.{
+                    .list = &.{
+                        .{ .word = "foo" },
+                        .{ .word = "bar" },
+                    },
+                },
+                .rhs = &.{
+                    .list = &.{
+                        .{ .word = "baz" },
+                        .{ .word = "bam" },
+                    },
+                },
+            } },
+        },
+        .redirections = &.{},
+        .assignments = &.{},
+    } };
+    const cmds = try parse(cmdline, allocator);
+    try testing.expectEqual(1, cmds.len);
+    try testing.expectEqualDeep(expect, cmds[0]);
+}
