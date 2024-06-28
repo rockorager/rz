@@ -215,8 +215,6 @@ const Interpreter = struct {
     fn setArgEnv(self: *Interpreter, args: []const []const u8) Allocator.Error!void {
         if (args.len > 1) {
             const storage = try std.mem.join(self.arena, "\x01", args[1..]);
-            log.err("{s}", .{storage});
-            log.err("{any}", .{storage});
             try self.env.put("*", storage);
         }
     }

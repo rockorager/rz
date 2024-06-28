@@ -23,7 +23,7 @@ pub fn logFn(
             defer std.debug.unlockStdErr();
             var bw = std.io.bufferedWriter(stderr);
             const writer = bw.writer();
-            writer.print("rz: " ++ format ++ "\n", args) catch return;
+            writer.print("rz: " ++ format ++ "\r\n", args) catch return;
             bw.flush() catch return;
         },
         else => {

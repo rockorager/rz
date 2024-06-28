@@ -272,27 +272,18 @@ const Parser = struct {
                     // _ = heredoc;
                 },
                 .r_angle => {
+                    self.index += 1;
                     const append: bool = blk: {
                         const tk = self.peekToken() orelse return error.SyntaxError;
                         if (tk.tag == .r_angle) {
-                            _ = self.nextToken();
-                            break :blk false;
+                            self.index += 1;
+                            break :blk true;
                         }
-                        break :blk true;
+                        break :blk false;
                     };
-                    const source = blk: while (self.nextToken()) |token2| {
-                        switch (token2.tag) {
-                            .wsp => continue,
-                            .word,
-                            .variable,
-                            .variable_count,
-                            .variable_string,
-                            => break :blk token2,
-                            else => return error.SyntaxError,
-                        }
-                    } else return error.SyntaxError;
+                    const source = try self.nextArgument() orelse return error.SyntaxError;
                     try redirs.append(.{
-                        .source = .{ .arg = self.tokenToArgument(source) },
+                        .source = .{ .arg = source },
                         .fd = std.posix.STDOUT_FILENO,
                         .append = append,
                     });
