@@ -144,6 +144,10 @@ pub fn draw(self: *Line, win: Window) void {
         });
         col += w;
         i += 1;
+        if (col >= win.width) {
+            row += 1;
+            col = 0;
+        }
         if (i == self.cursor_idx) {
             self.prev_cursor_col = col;
             self.prev_cursor_row = row;
