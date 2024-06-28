@@ -77,13 +77,16 @@ pub const Function = struct {
 };
 
 pub const Redirection = struct {
-    source: union(enum) {
-        arg: Argument,
-        heredoc: []const u8,
+    direction: enum {
+        in,
+        out,
     },
-    /// The fd of the command that is affected (could be either redirecting in or out)
-    fd: std.posix.fd_t,
     append: bool,
+    fd: std.posix.fd_t,
+    /// File *could* be more information for redirection, however this is easier parsed at execution
+    /// eg: it could be a concat of the form [2^=^1], which resolves to [2=1]. The interpreter will need
+    /// to handle this
+    file: Argument,
 };
 
 pub const Assignment = struct {
@@ -260,34 +263,18 @@ const Parser = struct {
                     const arg = try self.nextArgument() orelse unreachable;
                     try args.append(arg);
                 },
-                .l_angle => {
-                    @panic("TODO");
-                    // const heredoc: bool = blk: {
-                    //     if (self.peekToken() == .l_angle) {
-                    //         _ = self.nextToken();
-                    //         break :blk true;
-                    //     }
-                    //     break :blk false;
-                    // };
-                    // _ = heredoc;
+                .l_angle,
+                .r_angle,
+                .r_angle_r_angle,
+                => {
+                    const redir = try self.parseRedirection();
+                    try redirs.append(redir);
                 },
-                .r_angle => {
-                    self.index += 1;
-                    const append: bool = blk: {
-                        const tk = self.peekToken() orelse return error.SyntaxError;
-                        if (tk.tag == .r_angle) {
-                            self.index += 1;
-                            break :blk true;
-                        }
-                        break :blk false;
-                    };
-                    const source = try self.nextArgument() orelse return error.SyntaxError;
-                    try redirs.append(.{
-                        .source = .{ .arg = source },
-                        .fd = std.posix.STDOUT_FILENO,
-                        .append = append,
-                    });
-                },
+                .l_angle_l_angle => {}, // heredoc
+                .l_angle_l_brace,
+                .r_angle_l_brace,
+                .l_angle_r_angle_l_brace,
+                => {}, // pipefile redirection
                 .semicolon,
                 .newline,
                 .eof,
@@ -314,6 +301,54 @@ const Parser = struct {
         }
     }
 
+    fn parseRedirection(self: *Parser) Error!Redirection {
+        const first = self.nextToken() orelse unreachable;
+        var redir: Redirection = undefined;
+
+        switch (first.tag) {
+            .l_angle => {
+                redir.direction = .in;
+                redir.append = false;
+                redir.fd = std.posix.STDIN_FILENO;
+            },
+            .r_angle => {
+                redir.direction = .out;
+                redir.append = false;
+                redir.fd = std.posix.STDOUT_FILENO;
+            },
+            .r_angle_r_angle => {
+                redir.direction = .out;
+                redir.append = true;
+                redir.fd = std.posix.STDOUT_FILENO;
+            },
+            else => unreachable,
+        }
+
+        blk: {
+            if (self.maybeAny(&.{.wsp})) |_| {
+                redir.file = try self.nextArgument() orelse return error.SyntaxError;
+                break :blk;
+            }
+            const arg = try self.nextArgument() orelse return error.SyntaxError;
+            switch (arg) {
+                .word => |val| {
+                    // >[2] <file>
+                    // >[2=] or >[2=1] will be concats that the interpreter handles
+                    if (val[0] != '[') {
+                        redir.file = arg;
+                        break :blk;
+                    }
+                    const end = std.mem.indexOfScalarPos(u8, val, 1, ']') orelse return error.SyntaxError;
+                    redir.fd = std.fmt.parseUnsigned(u16, val[1..end], 10) catch return error.SyntaxError;
+                    self.eat(.wsp);
+                    redir.file = try self.nextArgument() orelse return error.SyntaxError;
+                },
+                else => redir.file = arg,
+            }
+        }
+        return redir;
+    }
+
     fn parseFn(self: *Parser) Error!void {
         // first token is 'fn'
         _ = self.nextToken() orelse unreachable;
@@ -326,14 +361,14 @@ const Parser = struct {
 
         self.eat(.wsp);
 
-        const opening_bracket = try self.want(.l_bracket);
-        const start = opening_bracket.loc.end;
+        const opening_brace = try self.want(.l_brace);
+        const start = opening_brace.loc.end;
 
         var count: usize = 1;
         const end: usize = while (self.nextToken()) |tok| {
             switch (tok.tag) {
-                .l_bracket => count += 1,
-                .r_bracket => count -= 1,
+                .l_brace => count += 1,
+                .r_brace => count -= 1,
                 else => continue,
             }
             if (count == 0) break tok.loc.start;
@@ -724,6 +759,48 @@ test "variable subscript" {
         .redirections = &.{},
         .assignments = &.{},
     } };
+    const cmds = try parse(cmdline, allocator);
+    try testing.expectEqual(1, cmds.len);
+    try testing.expectEqualDeep(expect, cmds[0]);
+}
+
+test "redirection" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const cmdline = "echo >foo >>[2] bar <[2=1]";
+    const expect: Command = .{
+        .simple = .{
+            .arguments = &.{.{ .word = "echo" }},
+            .redirections = &.{
+                .{
+                    .direction = .out,
+                    .append = false,
+                    .fd = std.posix.STDOUT_FILENO,
+                    .file = .{ .word = "foo" },
+                },
+                .{
+                    .direction = .out,
+                    .append = true,
+                    .fd = 2,
+                    .file = .{ .word = "bar" },
+                },
+                .{
+                    .direction = .in,
+                    .append = false,
+                    .fd = std.posix.STDIN_FILENO,
+                    .file = .{ .concatenate = .{
+                        .lhs = &.{ .word = "[2" },
+                        .rhs = &.{ .concatenate = .{
+                            .lhs = &.{ .word = "=" },
+                            .rhs = &.{ .word = "1]" },
+                        } },
+                    } },
+                },
+            },
+            .assignments = &.{},
+        },
+    };
     const cmds = try parse(cmdline, allocator);
     try testing.expectEqual(1, cmds.len);
     try testing.expectEqualDeep(expect, cmds[0]);

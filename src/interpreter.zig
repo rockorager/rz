@@ -84,28 +84,32 @@ const Interpreter = struct {
         if (arguments.items.len == 0) return;
 
         for (cmd.redirections) |redir| {
-            switch (redir.fd) {
-                std.posix.STDIN_FILENO => {},
-                std.posix.STDOUT_FILENO,
-                std.posix.STDERR_FILENO,
-                => {
-                    const dest = try self.resolveArg(redir.source.arg);
-                    if (dest.len != 1) {
-                        log.err("redirection requires exactly 1 destination", .{});
-                        return error.SyntaxError;
-                    }
-                    const dir = std.fs.cwd();
+            const file = try self.resolveArg(redir.file);
+            if (file.len != 1) {
+                log.err("redirection requires exactly 1 target", .{});
+                return error.SyntaxError;
+            }
+            if (file[0][0] == '[') {
+                // TODO: parse file for forms of [2=] or [2=1]
+            }
+            const dir = std.fs.cwd();
+            switch (redir.direction) {
+                .in => {
+                    const fd = dir.openFile(file[0], .{}) catch @panic("TODO");
+                    defer fd.close();
+                    std.posix.dup2(fd.handle, redir.fd) catch @panic("TODO");
+                },
+                .out => {
                     const flags: std.posix.O = .{
                         .ACCMODE = .WRONLY,
                         .CREAT = true,
                         .TRUNC = !redir.append,
                         .APPEND = redir.append,
                     };
-                    const fd = createFile(dir, dest[0], flags) catch @panic("TODO");
+                    const fd = createFile(dir, file[0], flags) catch @panic("TODO");
                     defer std.posix.close(fd);
                     std.posix.dup2(fd, redir.fd) catch @panic("TODO");
                 },
-                else => {},
             }
         }
 

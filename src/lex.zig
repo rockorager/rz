@@ -47,15 +47,15 @@ pub const Token = struct {
         pipe_pipe, // ||
         caret, // ^
         backtick, // `
-        l_bracket, // {
-        r_bracket, // }
+        l_brace, // {
+        r_brace, // }
         l_angle, // <
         l_angle_l_angle, // <<
-        l_angle_l_bracket, // <{
-        l_angle_r_angle_l_bracket, // <>{
+        l_angle_l_brace, // <{
+        l_angle_r_angle_l_brace, // <>{
         r_angle, // >
         r_angle_r_angle, // >>
-        r_angle_l_bracket, // >{
+        r_angle_l_brace, // >{
         at_sign, // @
         bang, // !
         tilde, // ~
@@ -180,11 +180,11 @@ pub const Tokenizer = struct {
                 token.loc.end = self.index;
             },
             '{' => {
-                token.tag = .l_bracket;
+                token.tag = .l_brace;
                 token.loc.end = self.index;
             },
             '}' => {
-                token.tag = .r_bracket;
+                token.tag = .r_brace;
                 token.loc.end = self.index;
             },
             '(' => {
@@ -207,7 +207,7 @@ pub const Tokenizer = struct {
                         },
                         '{' => {
                             self.index += 1;
-                            token.tag = .l_angle_l_bracket;
+                            token.tag = .l_angle_l_brace;
                             token.loc.end = self.index;
                         },
                         '>' => {
@@ -215,7 +215,7 @@ pub const Tokenizer = struct {
                                 switch (__b) {
                                     '{' => {
                                         self.index += 1;
-                                        token.tag = .l_angle_r_angle_l_bracket;
+                                        token.tag = .l_angle_r_angle_l_brace;
                                         token.loc.end = self.index;
                                     },
                                     else => {},
@@ -238,7 +238,7 @@ pub const Tokenizer = struct {
                         },
                         '{' => {
                             self.index += 1;
-                            token.tag = .r_angle_l_bracket;
+                            token.tag = .r_angle_l_brace;
                             token.loc.end = self.index;
                         },
                         else => {},
