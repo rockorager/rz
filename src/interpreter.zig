@@ -3,6 +3,8 @@ const testing = std.testing;
 const ast = @import("ast.zig");
 const Allocator = std.mem.Allocator;
 
+const main = @import("main.zig");
+
 const log = std.log.scoped(.interpreter);
 
 pub const Error = error{
@@ -90,6 +92,8 @@ const Interpreter = struct {
     arena: std.mem.Allocator,
     env: *std.process.EnvMap,
     exit: ?u8 = null,
+    /// The saved value of $*. We save it here and restore as needed
+    arg_env: ?[]const u8 = null,
 
     fn exec(self: *Interpreter, cmds: []const ast.Command) Error!?u8 {
         for (cmds) |cmd| {
@@ -176,12 +180,12 @@ const Interpreter = struct {
             break :blk arguments.items[1..];
         } else arguments.items;
 
-        log.err("executing command: '{s}'", .{args});
-
         if (!builtin and try self.execFunction(args)) return;
 
         if (try self.execBuiltin(args)) return;
 
+        if (main.args.verbose)
+            log.err("executing command: '{s}'", .{args});
         var process = std.process.Child.init(args, self.arena);
         process.env_map = self.env;
         const exit = process.spawnAndWait() catch |err| {
@@ -207,7 +211,10 @@ const Interpreter = struct {
     fn execFunction(self: *Interpreter, args: []const []const u8) Error!bool {
         const key = try std.fmt.allocPrint(self.arena, "fn#{s}", .{args[0]});
         if (self.env.get(key)) |val| {
+            if (main.args.verbose)
+                log.err("executing function: '{s}'", .{args});
             try self.setArgEnv(args);
+            defer self.restoreArgEnv();
             const cmds = ast.parse(val, self.arena) catch |err| {
                 switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -223,6 +230,8 @@ const Interpreter = struct {
 
     fn execBuiltin(self: *Interpreter, args: []const []const u8) Error!bool {
         const cmd = std.meta.stringToEnum(Builtin, args[0]) orelse return false;
+        if (main.args.verbose)
+            log.err("executing builtin: '{s}'", .{args});
         switch (cmd) {
             .cd => {
                 if (args.len == 1) {
@@ -271,10 +280,22 @@ const Interpreter = struct {
                 return true;
             },
         }
-        return false;
     }
 
+    fn restoreArgEnv(self: *Interpreter) void {
+        if (self.arg_env) |val| {
+            self.env.put("*", val) catch {};
+            self.arena.free(val);
+        } else {
+            self.env.remove("*");
+        }
+    }
+
+    /// Saves a copy of $* to our interpreter state and sets the new environment value
     fn setArgEnv(self: *Interpreter, args: []const []const u8) Allocator.Error!void {
+        if (self.env.get("*")) |val| {
+            self.arg_env = try self.arena.dupe(u8, val);
+        }
         if (args.len > 1) {
             const storage = try std.mem.join(self.arena, "\x01", args[1..]);
             try self.env.put("*", storage);

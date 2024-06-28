@@ -14,7 +14,7 @@ pub fn logFn(
     comptime level: std.log.Level,
     comptime scope: @TypeOf(.EnumLiteral),
     comptime format: []const u8,
-    args: anytype,
+    logargs: anytype,
 ) void {
     switch (scope) {
         .interpreter => {
@@ -23,7 +23,7 @@ pub fn logFn(
             defer std.debug.unlockStdErr();
             var bw = std.io.bufferedWriter(stderr);
             const writer = bw.writer();
-            writer.print("rz: " ++ format ++ "\r\n", args) catch return;
+            writer.print("rz: " ++ format ++ "\r\n", logargs) catch return;
             bw.flush() catch return;
         },
         else => {
@@ -32,13 +32,18 @@ pub fn logFn(
 
             var bw = std.io.bufferedWriter(log_file.writer());
             const writer = bw.writer();
-            writer.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
+            writer.print(level_txt ++ prefix2 ++ format ++ "\n", logargs) catch return;
             bw.flush() catch return;
         },
     }
 }
 
 var log_file: std.fs.File = undefined;
+
+pub var args: struct {
+    /// prints each executed function, builtin, or command to stderr prior to executing
+    verbose: bool = false,
+} = .{};
 
 pub fn main() !u8 {
     log_file = try std.fs.cwd().createFile("rz.log", .{ .truncate = true });
@@ -53,6 +58,12 @@ pub fn main() !u8 {
         }
     }
     const allocator = gpa.allocator();
+
+    var arg_iter = std.process.args();
+    while (arg_iter.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-v"))
+            args.verbose = true;
+    }
 
     var rz = try Rz.init(allocator);
 
