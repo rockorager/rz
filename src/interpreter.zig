@@ -5,74 +5,219 @@ const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.interpreter);
 
+pub const Error = error{
+    SyntaxError,
+    BuiltinCommandError,
+    OutOfMemory,
+} || std.posix.ChangeCurDirError;
+
+const Builtin = enum {
+    cd,
+    exit,
+};
+
 /// executes `src` as an rz script. env will be updated as necessary
-pub fn exec(allocator: std.mem.Allocator, src: []const u8, env: *std.process.EnvMap) !u8 {
+pub fn exec(allocator: std.mem.Allocator, src: []const u8, env: *std.process.EnvMap) Allocator.Error!?u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    const cmds = try ast.parse(src, alloc);
+    const cmds = ast.parse(src, alloc) catch |err| {
+        switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.SyntaxError => log.err("syntax error", .{}),
+        }
+        return null;
+    };
 
     var interp: Interpreter = .{
-        .allocator = alloc,
+        .arena = alloc,
         .env = env,
     };
-    return interp.exec(cmds);
+    return interp.exec(cmds) catch |err| {
+        switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return null,
+        }
+    };
 }
 
 const Interpreter = struct {
     arena: std.mem.Allocator,
     env: *std.process.EnvMap,
+    exit: ?u8 = null,
 
-    /// exec can only error for out of memory
-    fn exec(self: *Interpreter, cmds: []const ast.Command) Allocator.Error!u8 {
+    fn exec(self: *Interpreter, cmds: []const ast.Command) Error!?u8 {
         for (cmds) |cmd| {
             switch (cmd) {
                 .simple => |simple| try self.execSimple(simple),
                 .function => |func| {
-                    var buf: [256]u8 = undefined;
-                    const key = try std.fmt.bufPrint(&buf, "fn#{s}", .{func.name});
+                    const key = try std.fmt.allocPrint(self.arena, "fn#{s}", .{func.name});
                     try self.env.put(key, func.body);
                 },
-                .assignment => |assignment| try self.execAssignment(self.arena(), assignment),
+                .assignment => |assignment| try self.execAssignment(assignment),
             }
-            // if (self.callstack.items.len > 0 and self.exit != null) {
-            //     self.setStatus(self.exit.?);
-            //     self.exit = null;
-            //     return;
-            // }
+        }
+        return self.exit;
+    }
+
+    fn execAssignment(self: *Interpreter, cmd: ast.Assignment) Error!void {
+        const value = try self.resolveArg(cmd.value);
+        const storage = try std.mem.join(self.arena, "\x01", value);
+        try self.env.put(cmd.key, storage);
+    }
+
+    fn execSimple(self: *Interpreter, cmd: ast.Simple) Error!void {
+        for (cmd.assignments) |assignment| {
+            try self.execAssignment(assignment);
+        }
+        defer {
+            for (cmd.assignments) |assignment| {
+                self.env.remove(assignment.key);
+            }
+        }
+
+        var arguments = std.ArrayList([]const u8).init(self.arena);
+        for (cmd.arguments) |arg| {
+            const resolved = try self.resolveArg(arg);
+            try arguments.appendSlice(resolved);
+        }
+        if (arguments.items.len == 0) return;
+
+        for (cmd.redirections) |redir| {
+            switch (redir.fd) {
+                std.posix.STDIN_FILENO => {},
+                std.posix.STDOUT_FILENO,
+                std.posix.STDERR_FILENO,
+                => {
+                    const dest = try self.resolveArg(redir.source.arg);
+                    if (dest.len != 1) {
+                        log.err("redirection requires exactly 1 destination", .{});
+                        return error.SyntaxError;
+                    }
+                    const dir = std.fs.cwd();
+                    const flags: std.posix.O = .{
+                        .ACCMODE = .WRONLY,
+                        .CREAT = true,
+                        .TRUNC = !redir.append,
+                        .APPEND = redir.append,
+                    };
+                    const fd = createFile(dir, dest[0], flags) catch @panic("TODO");
+                    defer std.posix.close(fd);
+                    std.posix.dup2(fd, redir.fd) catch @panic("TODO");
+                },
+                else => {},
+            }
+        }
+
+        const builtin = std.mem.eql(u8, "builtin", arguments.items[0]);
+
+        const args = if (builtin) blk: {
+            if (arguments.items.len == 1) return;
+            break :blk arguments.items[1..];
+        } else arguments.items;
+
+        if (!builtin and try self.execFunction(args)) return;
+
+        if (try self.execBuiltin(args)) return;
+
+        var process = std.process.Child.init(args, self.arena);
+        process.env_map = self.env;
+        const exit = process.spawnAndWait() catch |err| {
+            switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.FileNotFound => {
+                    log.err("command '{s}' not found", .{arguments.items[0]});
+                    self.setStatus(127) catch return;
+                },
+                error.AccessDenied => log.err("access denied", .{}),
+                else => log.err("unexpected error: {}", .{err}),
+            }
+            // TODO: map error codes
+            self.setStatus(1) catch return;
+            return;
+        };
+        switch (exit) {
+            .Exited => |val| try self.setStatus(val),
+            else => {},
         }
     }
 
-    fn execAssignment(self: *Interpreter, cmd: ast.Assignment) Allocator.Error!u8 {
-        switch (cmd.value.tag) {
-            .word => try self.env.put(cmd.key, cmd.value.val),
-            // .variable => {
-            //     if (self.env.get(cmd.value.val)) |val| {
-            //         try self.env.put(cmd.key, val);
-            //     }
-            // },
-            // .variable_string => {
-            //     if (self.env.get(cmd.value.val)) |val| {
-            //         const val2 = try allocator.dupe(u8, val);
-            //         std.mem.replaceScalar(u8, val2, '\x01', ' ');
-            //         try self.env.put(cmd.key, val2);
-            //     } else try self.env.put(cmd.key, "");
-            // },
-            // .variable_count => {
-            //     if (self.env.get(cmd.value.val)) |val| {
-            //         const n = std.mem.count(u8, val, "\x01");
-            //         var buf: [8]u8 = undefined;
-            //         const val2 = try std.fmt.bufPrint(&buf, "{d}", .{n});
-            //         try self.env.put(cmd.key, val2);
-            //     } else try self.env.put(cmd.key, "0");
-            // },
-            else => unreachable,
+    fn execFunction(self: *Interpreter, args: []const []const u8) Error!bool {
+        const key = try std.fmt.allocPrint(self.arena, "fn#{s}", .{args[0]});
+        if (self.env.get(key)) |val| {
+            const cmds = ast.parse(val, self.arena) catch |err| {
+                switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.SyntaxError => log.err("syntax error", .{}),
+                }
+                return true;
+            };
+            _ = try self.exec(cmds);
+            return true;
         }
+        return false;
+    }
+
+    fn execBuiltin(self: *Interpreter, args: []const []const u8) Error!bool {
+        const cmd = std.meta.stringToEnum(Builtin, args[0]) orelse return false;
+        switch (cmd) {
+            .cd => {
+                if (args.len == 1) {
+                    if (self.env.get("home")) |home| {
+                        try std.process.changeCurDir(home);
+                    }
+                    return true;
+                }
+                if (args[1][0] == '/') {
+                    try std.process.changeCurDir(args[1]);
+                    return true;
+                }
+                var components = std.ArrayList([]const u8).init(self.arena);
+                // we add a / because path.join doesn't return an absolute path
+                components.append("/") catch return true;
+                const cwd = std.process.getCwdAlloc(self.arena) catch |err| {
+                    switch (err) {
+                        Allocator.Error.OutOfMemory => return error.OutOfMemory,
+                        else => return error.BuiltinCommandError,
+                    }
+                };
+                var iter = std.mem.splitScalar(u8, cwd, '/');
+                while (iter.next()) |v| {
+                    if (v.len == 0) continue;
+                    components.append(v) catch return true;
+                }
+                iter = std.mem.splitScalar(u8, args[1], '/');
+                while (iter.next()) |p| {
+                    if (std.mem.eql(u8, "..", p)) {
+                        components.items.len -|= 1;
+                        continue;
+                    }
+                    components.append(p) catch return true;
+                }
+
+                const path = try std.fs.path.join(self.arena, components.items);
+                try std.process.changeCurDir(path);
+                return true;
+            },
+            .exit => {
+                self.exit = if (args.len > 1)
+                    std.fmt.parseUnsigned(u8, args[1], 10) catch return error.SyntaxError
+                else
+                    0;
+                try self.setStatus(self.exit.?);
+                return true;
+            },
+        }
+        return false;
+    }
+
+    fn setStatus(self: *Interpreter, status: u8) Allocator.Error!void {
+        const str = try std.fmt.allocPrint(self.arena, "{d}", .{status});
+        try self.env.put("status", str);
     }
 
     /// resolves an argument to list of strings
-    /// quoted_word is unquoted
-    fn resolveArg(self: *Interpreter, arg: ast.Argument) Allocator.Error![]const []const u8 {
+    fn resolveArg(self: *Interpreter, arg: ast.Argument) Error![]const []const u8 {
         var result = std.ArrayList([]const u8).init(self.arena);
         switch (arg) {
             .word => |word| try result.append(word),
@@ -117,7 +262,7 @@ const Interpreter = struct {
                 for (subscripts) |subscript| {
                     const n = std.fmt.parseUnsigned(usize, subscript, 10) catch |err| {
                         log.err("subscript error: '{s}' error: {}", .{ subscript, err });
-                        continue;
+                        return error.SyntaxError;
                     };
                     if (n == 0) continue;
                     if (n - 1 < list.items.len) {
@@ -130,7 +275,7 @@ const Interpreter = struct {
                 const rhs = try self.resolveArg(concat.rhs.*);
                 if (lhs.len == 0 or rhs.len == 0) {
                     log.err("tried concatenating a zero length list. Not supported at this time", .{});
-                    return result.items;
+                    return error.SyntaxError;
                 }
                 // equal lengths we pairwise concatenate
                 if (lhs.len == rhs.len) {
@@ -160,6 +305,11 @@ const Interpreter = struct {
         return result.items;
     }
 };
+
+fn createFile(dir: std.fs.Dir, path: []const u8, flags: std.posix.O) !std.posix.fd_t {
+    const cpath = try std.posix.toPosixPath(path);
+    return std.posix.openatZ(dir.fd, &cpath, flags, std.fs.File.default_mode);
+}
 
 test "resolve arguments" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

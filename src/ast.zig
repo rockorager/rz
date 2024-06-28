@@ -5,6 +5,11 @@ const Token = lex.Token;
 
 const log = std.log.scoped(.rz);
 
+pub const Error = error{
+    SyntaxError,
+    OutOfMemory,
+};
+
 pub const Command = union(enum) {
     simple: Simple,
     function: Function,
@@ -87,7 +92,7 @@ pub const Assignment = struct {
 };
 
 /// Parses src into a sequence of commands. Allocations are not tracked. Use an arena!
-pub fn parse(src: []const u8, arena: std.mem.Allocator) ![]Command {
+pub fn parse(src: []const u8, arena: std.mem.Allocator) Error![]Command {
     var lexer = lex.Tokenizer.init(src);
 
     // We init capacity to 4:1 ratio. Because maybe median token is is 4 long?
@@ -144,7 +149,7 @@ const Parser = struct {
         return self.tokens[self.index];
     }
 
-    fn nextArgument(self: *Parser) !?Argument {
+    fn nextArgument(self: *Parser) Error!?Argument {
         const first = self.nextToken() orelse return null;
         switch (first.tag) {
             .word,
@@ -214,7 +219,7 @@ const Parser = struct {
         return null;
     }
 
-    fn parseAssignments(self: *Parser) ![]Assignment {
+    fn parseAssignments(self: *Parser) Error![]Assignment {
         var locals = std.ArrayList(Assignment).init(self.allocator);
         while (true) {
             self.eat(.wsp);
@@ -238,7 +243,7 @@ const Parser = struct {
     }
 
     /// parses a simple command
-    fn parseSimple(self: *Parser) !void {
+    fn parseSimple(self: *Parser) Error!void {
         var args = std.ArrayList(Argument).init(self.allocator);
         var redirs = std.ArrayList(Redirection).init(self.allocator);
         const locals = try self.parseAssignments();
@@ -318,7 +323,7 @@ const Parser = struct {
         }
     }
 
-    fn parseFn(self: *Parser) !void {
+    fn parseFn(self: *Parser) Error!void {
         // first token is 'fn'
         _ = self.nextToken() orelse unreachable;
 
@@ -392,7 +397,7 @@ const Parser = struct {
         }
     }
 
-    fn checkConcat(self: *Parser, arg: Argument) anyerror!Argument {
+    fn checkConcat(self: *Parser, arg: Argument) Error!Argument {
         var local = arg;
         while (self.freeCaret(local)) {
             const lhs = try self.allocator.create(Argument);

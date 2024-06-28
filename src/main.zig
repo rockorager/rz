@@ -16,17 +16,25 @@ pub fn logFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    const level_txt = comptime level.asText();
-    const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
+    switch (scope) {
+        .interpreter => {
+            const stderr = std.io.getStdErr().writer();
+            std.debug.lockStdErr();
+            defer std.debug.unlockStdErr();
+            var bw = std.io.bufferedWriter(stderr);
+            const writer = bw.writer();
+            writer.print("rz: " ++ format ++ "\n", args) catch return;
+            bw.flush() catch return;
+        },
+        else => {
+            const level_txt = comptime level.asText();
+            const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
 
-    var bw = std.io.bufferedWriter(log_file.writer());
-    const writer = bw.writer();
-
-    std.debug.lockStdErr();
-    defer std.debug.unlockStdErr();
-    nosuspend {
-        writer.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
-        bw.flush() catch return;
+            var bw = std.io.bufferedWriter(log_file.writer());
+            const writer = bw.writer();
+            writer.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
+            bw.flush() catch return;
+        },
     }
 }
 
