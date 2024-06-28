@@ -50,7 +50,12 @@ pub const Token = struct {
         l_bracket, // {
         r_bracket, // }
         l_angle, // <
+        l_angle_l_angle, // <<
+        l_angle_l_bracket, // <{
+        l_angle_r_angle_l_bracket, // <>{
         r_angle, // >
+        r_angle_r_angle, // >>
+        r_angle_l_bracket, // >{
         at_sign, // @
         bang, // !
         tilde, // ~
@@ -193,10 +198,52 @@ pub const Tokenizer = struct {
             '<' => {
                 token.tag = .l_angle;
                 token.loc.end = self.index;
+                if (self.peek()) |_b| {
+                    switch (_b) {
+                        '<' => {
+                            self.index += 1;
+                            token.tag = .l_angle_l_angle;
+                            token.loc.end = self.index;
+                        },
+                        '{' => {
+                            self.index += 1;
+                            token.tag = .l_angle_l_bracket;
+                            token.loc.end = self.index;
+                        },
+                        '>' => {
+                            if (self.peek()) |__b| {
+                                switch (__b) {
+                                    '{' => {
+                                        self.index += 1;
+                                        token.tag = .l_angle_r_angle_l_bracket;
+                                        token.loc.end = self.index;
+                                    },
+                                    else => {},
+                                }
+                            }
+                        },
+                        else => {},
+                    }
+                }
             },
             '>' => {
                 token.tag = .r_angle;
                 token.loc.end = self.index;
+                if (self.peek()) |_b| {
+                    switch (_b) {
+                        '>' => {
+                            self.index += 1;
+                            token.tag = .r_angle_r_angle;
+                            token.loc.end = self.index;
+                        },
+                        '{' => {
+                            self.index += 1;
+                            token.tag = .r_angle_l_bracket;
+                            token.loc.end = self.index;
+                        },
+                        else => {},
+                    }
+                }
             },
             '~' => {
                 token.tag = .tilde;
