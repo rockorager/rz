@@ -47,6 +47,7 @@ pub const Token = struct {
         pipe_pipe, // ||
         caret, // ^
         backtick, // `
+        backtick_l_brace, // `{
         l_brace, // {
         r_brace, // }
         l_angle, // <
@@ -167,6 +168,16 @@ pub const Tokenizer = struct {
             '`' => {
                 token.tag = .backtick;
                 token.loc.end = self.index;
+                if (self.peek()) |_b| {
+                    switch (_b) {
+                        '{' => {
+                            self.index += 1;
+                            token.tag = .backtick_l_brace;
+                            token.loc.end = self.index;
+                        },
+                        else => {},
+                    }
+                }
             },
             '\'' => {
                 token.tag = .quoted_word;

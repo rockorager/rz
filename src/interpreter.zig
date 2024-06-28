@@ -33,6 +33,10 @@ pub fn exec(allocator: std.mem.Allocator, src: []const u8, env: *std.process.Env
         .arena = alloc,
         .env = env,
     };
+
+    const fds = saveFds();
+    defer restoreFds(fds);
+
     return interp.exec(cmds) catch |err| {
         switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -41,6 +45,47 @@ pub fn exec(allocator: std.mem.Allocator, src: []const u8, env: *std.process.Env
     };
 }
 
+fn saveFds() [3]std.posix.fd_t {
+    var fds: [3]std.posix.fd_t = .{
+        std.posix.STDIN_FILENO,
+        std.posix.STDOUT_FILENO,
+        std.posix.STDERR_FILENO,
+    };
+    fds[0] = std.posix.dup(fds[0]) catch |err| blk: {
+        log.err("dup error: {}", .{err});
+        break :blk std.posix.STDIN_FILENO;
+    };
+    fds[1] = std.posix.dup(fds[1]) catch |err| blk: {
+        log.err("dup error: {}", .{err});
+        break :blk std.posix.STDOUT_FILENO;
+    };
+    fds[2] = std.posix.dup(fds[2]) catch |err| blk: {
+        log.err("dup error: {}", .{err});
+        break :blk std.posix.STDERR_FILENO;
+    };
+    return fds;
+}
+
+fn restoreFds(fds: [3]std.posix.fd_t) void {
+    if (fds[0] != std.posix.STDIN_FILENO) {
+        std.posix.dup2(fds[0], std.posix.STDIN_FILENO) catch |err| {
+            log.err("dup2 error: {}", .{err});
+        };
+        std.posix.close(fds[0]);
+    }
+    if (fds[1] != std.posix.STDOUT_FILENO) {
+        std.posix.dup2(fds[1], std.posix.STDOUT_FILENO) catch |err| {
+            log.err("dup2 error: {}", .{err});
+        };
+        std.posix.close(fds[1]);
+    }
+    if (fds[2] != std.posix.STDERR_FILENO) {
+        std.posix.dup2(fds[2], std.posix.STDERR_FILENO) catch |err| {
+            log.err("dup2 error: {}", .{err});
+        };
+        std.posix.close(fds[2]);
+    }
+}
 const Interpreter = struct {
     arena: std.mem.Allocator,
     env: *std.process.EnvMap,
@@ -130,6 +175,8 @@ const Interpreter = struct {
             if (arguments.items.len == 1) return;
             break :blk arguments.items[1..];
         } else arguments.items;
+
+        log.err("executing command: '{s}'", .{args});
 
         if (!builtin and try self.execFunction(args)) return;
 
@@ -322,6 +369,57 @@ const Interpreter = struct {
                 for (list) |item| {
                     const resolved = try self.resolveArg(item);
                     try result.appendSlice(resolved);
+                }
+            },
+            .substitution => |cmds| {
+                // We run the commands as usual, but we gather all stdout. We do this with a simple
+                // pipe
+                const fds = std.posix.pipe() catch @panic("TODO");
+                const read_end = fds[0];
+                const write_end = fds[1];
+                defer {
+                    std.posix.close(read_end);
+                    std.posix.close(write_end);
+                }
+
+                {
+                    // Set read_end to nonblocking
+                    const flags = std.posix.fcntl(read_end, std.posix.F.GETFL, 0) catch @panic("TODO");
+                    _ = std.posix.fcntl(
+                        read_end,
+                        std.posix.F.SETFL,
+                        flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })),
+                    ) catch @panic("TODO");
+                }
+
+                const saved = saveFds();
+                defer restoreFds(saved);
+                std.posix.dup2(write_end, std.posix.STDOUT_FILENO) catch @panic("TODO");
+                _ = try self.exec(cmds);
+                var buf: [4096]u8 = undefined;
+                var stdout = std.ArrayList(u8).init(self.arena);
+                while (true) {
+                    const n = std.posix.read(read_end, &buf) catch break;
+                    if (n == 0) break;
+                    try stdout.appendSlice(buf[0..n]);
+                }
+                // Next we split by $ifs
+                const ifs: []const u8 = if (self.env.get("ifs")) |ifs| blk: {
+                    var ifs_joined = std.ArrayList(u8).init(self.arena);
+                    var iter = std.mem.splitScalar(u8, ifs, '\x01');
+                    while (iter.next()) |sep| {
+                        if (sep.len != 1) {
+                            log.err("invalid ifs char: {s}. Must be a single byte", .{sep});
+                            continue;
+                        }
+                        try ifs_joined.append(sep[0]);
+                    }
+                    break :blk ifs_joined.items;
+                } else " \t\n";
+                var iter = std.mem.splitAny(u8, stdout.items, ifs);
+                while (iter.next()) |item| {
+                    if (item.len == 0) continue;
+                    try result.append(item);
                 }
             },
         }

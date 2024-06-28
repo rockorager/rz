@@ -129,11 +129,10 @@ pub fn run(self: *Rz) !u8 {
                     _ = arena.reset(.retain_capacity);
                     loop.stop();
 
-                    try any.writeAll("\r\n");
                     if (self.vx.caps.kitty_keyboard)
                         try any.writeAll(vaxis.ctlseqs.csi_u_pop);
+                    try any.writeAll("\r\n");
                     try writer.flush();
-                    const fd = try std.posix.dup(self.tty.fd);
 
                     resetTty(self.tty);
                     // Only returns an error for OutOfMemory
@@ -145,8 +144,6 @@ pub fn run(self: *Rz) !u8 {
                         try any.print(vaxis.ctlseqs.csi_u_push, .{flag_int});
                     }
                     zedit.clearRetainingCapacity();
-                    try std.posix.dup2(fd, std.posix.STDOUT_FILENO);
-                    self.tty.fd = fd;
                     try makeRaw(self.tty);
                     try loop.start();
                     // we check exit condition after restarting loop so we can properly clean up

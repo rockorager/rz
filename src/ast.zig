@@ -31,6 +31,7 @@ pub const Argument = union(enum) {
         rhs: *const Argument,
     },
     list: []const Argument,
+    substitution: []const Command,
 
     pub fn format(
         self: Argument,
@@ -58,6 +59,9 @@ pub const Argument = union(enum) {
             .variable_string => |variable| try writer.print("$\"{s}", .{variable}),
             .variable_subscript => |variable| {
                 try writer.print("${s}{}", .{ variable.key, variable.fields });
+            },
+            .substitution => |sub| {
+                try writer.print("`\\{{}\\}", .{sub});
             },
         }
     }
@@ -113,20 +117,7 @@ pub fn parse(src: []const u8, arena: std.mem.Allocator) Error![]Command {
         .commands = try std.ArrayList(Command).initCapacity(arena, 1),
         .src = src,
     };
-    while (parser.peekToken()) |token| {
-        switch (token.tag) {
-            .eof => break,
-            .wsp => parser.index += 1,
-            .comment => parser.index += 1,
-            .word, .variable => try parser.parseSimple(),
-            .keyword_fn => try parser.parseFn(),
-            else => {
-                log.debug("unhandled first token: {}", .{token.tag});
-                parser.index += 1;
-            },
-        }
-    }
-    return parser.commands.items;
+    return parser.parseTokens();
 }
 
 const Parser = struct {
@@ -136,6 +127,26 @@ const Parser = struct {
     tokens: []const Token,
     /// token index
     index: usize = 0,
+
+    fn parseTokens(self: *Parser) Error![]Command {
+        while (self.peekToken()) |token| {
+            switch (token.tag) {
+                .eof => break,
+                .wsp => self.index += 1,
+                .comment => self.index += 1,
+                .word,
+                .variable,
+                .backtick_l_brace,
+                => try self.parseSimple(),
+                .keyword_fn => try self.parseFn(),
+                else => {
+                    log.debug("unhandled first token: {}", .{token.tag});
+                    self.index += 1;
+                },
+            }
+        }
+        return self.commands.items;
+    }
 
     fn tokenContent(self: Parser, loc: Token.Loc) []const u8 {
         return self.src[loc.start..loc.end];
@@ -217,6 +228,33 @@ const Parser = struct {
                 }
                 return error.SyntaxError;
             },
+            .backtick_l_brace => {
+                const start = self.index;
+                var brace_cnt: usize = 1;
+                const end = while (self.nextToken()) |tok| {
+                    switch (tok.tag) {
+                        .l_brace,
+                        .l_angle_l_brace,
+                        .r_angle_l_brace,
+                        .backtick_l_brace,
+                        => brace_cnt += 1,
+                        .r_brace => {
+                            brace_cnt -|= 1;
+                            if (brace_cnt == 0) break self.index;
+                        },
+                        else => {},
+                    }
+                } else return error.SyntaxError;
+
+                var parser: Parser = .{
+                    .allocator = self.allocator,
+                    .tokens = self.tokens[start..end],
+                    .commands = try std.ArrayList(Command).initCapacity(self.allocator, 1),
+                    .src = self.src,
+                };
+                const cmds = try parser.parseTokens();
+                return .{ .substitution = cmds };
+            },
             else => return error.SyntaxError,
         }
         return null;
@@ -259,6 +297,7 @@ const Parser = struct {
                 .variable_count,
                 .variable_string,
                 .l_paren,
+                .backtick_l_brace,
                 => {
                     const arg = try self.nextArgument() orelse unreachable;
                     try args.append(arg);
