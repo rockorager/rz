@@ -149,15 +149,10 @@ pub const Tokenizer = struct {
                         token.loc.start += 1;
                         self.consumeByte();
                     },
-                    '*' => {
-                        token.tag = .variable;
-                        token.loc.start += 1;
-                        self.consumeByte();
-                    },
                     else => token.tag = .variable,
                 }
                 while (self.readByte()) |__b| {
-                    if (ascii.isAlphanumeric(__b) or __b == '_')
+                    if (ascii.isAlphanumeric(__b) or __b == '_' or __b == '*')
                         continue;
                     self.index -= 1;
                     break;

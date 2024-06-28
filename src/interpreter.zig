@@ -145,6 +145,7 @@ const Interpreter = struct {
     fn execFunction(self: *Interpreter, args: []const []const u8) Error!bool {
         const key = try std.fmt.allocPrint(self.arena, "fn#{s}", .{args[0]});
         if (self.env.get(key)) |val| {
+            try self.setArgEnv(args);
             const cmds = ast.parse(val, self.arena) catch |err| {
                 switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -209,6 +210,15 @@ const Interpreter = struct {
             },
         }
         return false;
+    }
+
+    fn setArgEnv(self: *Interpreter, args: []const []const u8) Allocator.Error!void {
+        if (args.len > 1) {
+            const storage = try std.mem.join(self.arena, "\x01", args[1..]);
+            log.err("{s}", .{storage});
+            log.err("{any}", .{storage});
+            try self.env.put("*", storage);
+        }
     }
 
     fn setStatus(self: *Interpreter, status: u8) Allocator.Error!void {
