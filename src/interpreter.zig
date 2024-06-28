@@ -90,26 +90,37 @@ const Interpreter = struct {
                 return error.SyntaxError;
             }
             if (file[0][0] == '[') {
-                // TODO: parse file for forms of [2=] or [2=1]
-            }
-            const dir = std.fs.cwd();
-            switch (redir.direction) {
-                .in => {
-                    const fd = dir.openFile(file[0], .{}) catch @panic("TODO");
-                    defer fd.close();
-                    std.posix.dup2(fd.handle, redir.fd) catch @panic("TODO");
-                },
-                .out => {
-                    const flags: std.posix.O = .{
-                        .ACCMODE = .WRONLY,
-                        .CREAT = true,
-                        .TRUNC = !redir.append,
-                        .APPEND = redir.append,
-                    };
-                    const fd = createFile(dir, file[0], flags) catch @panic("TODO");
-                    defer std.posix.close(fd);
-                    std.posix.dup2(fd, redir.fd) catch @panic("TODO");
-                },
+                const f = file[0];
+                if (f[f.len - 1] != ']') return error.SyntaxError;
+                var iter = std.mem.splitScalar(u8, f[1 .. f.len - 1], '=');
+                const lhs_buf = iter.first();
+                const lhs = std.fmt.parseUnsigned(u16, lhs_buf, 10) catch return error.SyntaxError;
+                if (iter.next()) |rhs_buf| {
+                    const rhs = std.fmt.parseUnsigned(u16, rhs_buf, 10) catch return error.SyntaxError;
+                    std.posix.dup2(rhs, lhs) catch @panic("TODO");
+                } else {
+                    std.posix.close(lhs);
+                }
+            } else {
+                const dir = std.fs.cwd();
+                switch (redir.direction) {
+                    .in => {
+                        const fd = dir.openFile(file[0], .{}) catch @panic("TODO");
+                        defer fd.close();
+                        std.posix.dup2(fd.handle, redir.fd) catch @panic("TODO");
+                    },
+                    .out => {
+                        const flags: std.posix.O = .{
+                            .ACCMODE = .WRONLY,
+                            .CREAT = true,
+                            .TRUNC = !redir.append,
+                            .APPEND = redir.append,
+                        };
+                        const fd = createFile(dir, file[0], flags) catch @panic("TODO");
+                        defer std.posix.close(fd);
+                        std.posix.dup2(fd, redir.fd) catch @panic("TODO");
+                    },
+                }
             }
         }
 
