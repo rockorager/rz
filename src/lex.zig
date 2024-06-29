@@ -127,7 +127,7 @@ pub const Tokenizer = struct {
                 token.tag = .pipe;
                 token.loc.end = self.index;
                 const _b = self.peek() orelse return token;
-                if (_b == '&') {
+                if (_b == '|') {
                     self.consumeByte();
                     token.tag = .pipe_pipe;
                     token.loc.end = self.index;

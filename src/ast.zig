@@ -15,6 +15,8 @@ pub const Command = union(enum) {
     function: Function, // fn foo {...}
     assignment: Assignment, // foo=$bar
     group: []const Command, // {foo;bar}
+    if_zero, // &&
+    if_nonzero, // ||
 };
 
 pub const Argument = union(enum) {
@@ -142,6 +144,14 @@ const Parser = struct {
                     try self.commands.append(.{ .group = cmds });
                 },
                 .keyword_fn => try self.parseFn(),
+                .ampersand_ampersand => {
+                    self.index += 1;
+                    try self.commands.append(.if_zero);
+                },
+                .pipe_pipe => {
+                    self.index += 1;
+                    try self.commands.append(.if_nonzero);
+                },
                 else => {
                     log.debug("unhandled first token: {}", .{token.tag});
                     self.index += 1;
@@ -326,6 +336,10 @@ const Parser = struct {
                 .semicolon,
                 .newline,
                 .eof,
+                .ampersand,
+                .ampersand_ampersand,
+                .pipe,
+                .pipe_pipe,
                 => break,
                 else => {
                     log.warn("unhandled token: {}", .{token});
@@ -907,4 +921,62 @@ test "group" {
     const cmds = try parse(cmdline, allocator);
     try testing.expectEqual(1, cmds.len);
     try testing.expectEqualDeep(expect, cmds[0]);
+}
+
+test "&&" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const cmdline = "ls && echo foo";
+    const cmd1: Command = .{ .simple = .{
+        .arguments = &.{
+            .{ .word = "ls" },
+        },
+        .redirections = &.{},
+        .assignments = &.{},
+    } };
+    const cmd2: Command = .if_zero;
+    const cmd3: Command = .{ .simple = .{
+        .arguments = &.{
+            .{ .word = "echo" },
+            .{ .word = "foo" },
+        },
+        .redirections = &.{},
+        .assignments = &.{},
+    } };
+
+    const cmds = try parse(cmdline, allocator);
+    try testing.expectEqual(3, cmds.len);
+    try testing.expectEqualDeep(cmd1, cmds[0]);
+    try testing.expectEqualDeep(cmd2, cmds[1]);
+    try testing.expectEqualDeep(cmd3, cmds[2]);
+}
+
+test "||" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const cmdline = "ls || echo foo";
+    const cmd1: Command = .{ .simple = .{
+        .arguments = &.{
+            .{ .word = "ls" },
+        },
+        .redirections = &.{},
+        .assignments = &.{},
+    } };
+    const cmd2: Command = .if_nonzero;
+    const cmd3: Command = .{ .simple = .{
+        .arguments = &.{
+            .{ .word = "echo" },
+            .{ .word = "foo" },
+        },
+        .redirections = &.{},
+        .assignments = &.{},
+    } };
+
+    const cmds = try parse(cmdline, allocator);
+    try testing.expectEqual(3, cmds.len);
+    try testing.expectEqualDeep(cmd1, cmds[0]);
+    try testing.expectEqualDeep(cmd2, cmds[1]);
+    try testing.expectEqualDeep(cmd3, cmds[2]);
 }

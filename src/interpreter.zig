@@ -107,6 +107,24 @@ const Interpreter = struct {
                 },
                 .assignment => |assignment| try self.execAssignment(assignment),
                 .group => |grp| _ = try self.exec(grp),
+                .if_zero => {
+                    if (self.env.get("status")) |status| {
+                        if (std.mem.eql(u8, "0", status))
+                            continue
+                        else {
+                            const result = std.fmt.parseUnsigned(u8, status, 10) catch unreachable;
+                            return result;
+                        }
+                    }
+                },
+                .if_nonzero => {
+                    if (self.env.get("status")) |status| {
+                        if (!std.mem.eql(u8, "0", status))
+                            continue
+                        else
+                            return 0;
+                    }
+                },
             }
         }
         return self.exit;
