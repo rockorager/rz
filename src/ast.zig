@@ -11,9 +11,10 @@ pub const Error = error{
 };
 
 pub const Command = union(enum) {
-    simple: Simple,
-    function: Function,
-    assignment: Assignment,
+    simple: Simple, // echo foo bar
+    function: Function, // fn foo {...}
+    assignment: Assignment, // foo=$bar
+    group: []const Command, // {foo;bar}
 };
 
 pub const Argument = union(enum) {
@@ -57,12 +58,8 @@ pub const Argument = union(enum) {
             .variable => |variable| try writer.print("${s}", .{variable}),
             .variable_count => |variable| try writer.print("$#{s}", .{variable}),
             .variable_string => |variable| try writer.print("$\"{s}", .{variable}),
-            .variable_subscript => |variable| {
-                try writer.print("${s}{}", .{ variable.key, variable.fields });
-            },
-            .substitution => |sub| {
-                try writer.print("`{any}", .{sub});
-            },
+            .variable_subscript => |variable| try writer.print("${s}{}", .{ variable.key, variable.fields }),
+            .substitution => |sub| try writer.print("`{{{any}}}", .{sub}),
         }
     }
 };
@@ -138,6 +135,12 @@ const Parser = struct {
                 .variable,
                 .backtick_l_brace,
                 => try self.parseSimple(),
+                .l_brace => {
+                    self.index += 1;
+                    // parse group wants us to consume the first brace
+                    const cmds = try self.parseGroup();
+                    try self.commands.append(.{ .group = cmds });
+                },
                 .keyword_fn => try self.parseFn(),
                 else => {
                     log.debug("unhandled first token: {}", .{token.tag});
@@ -228,36 +231,41 @@ const Parser = struct {
                 }
                 return error.SyntaxError;
             },
-            .backtick_l_brace => {
-                const start = self.index;
-                var brace_cnt: usize = 1;
-                const end = while (self.nextToken()) |tok| {
-                    switch (tok.tag) {
-                        .l_brace,
-                        .l_angle_l_brace,
-                        .r_angle_l_brace,
-                        .backtick_l_brace,
-                        => brace_cnt += 1,
-                        .r_brace => {
-                            brace_cnt -|= 1;
-                            if (brace_cnt == 0) break self.index -| 1;
-                        },
-                        else => {},
-                    }
-                } else return error.SyntaxError;
-
-                var parser: Parser = .{
-                    .allocator = self.allocator,
-                    .tokens = self.tokens[start..end],
-                    .commands = try std.ArrayList(Command).initCapacity(self.allocator, 1),
-                    .src = self.src,
-                };
-                const cmds = try parser.parseTokens();
+            .backtick_l_brace,
+            => {
+                const cmds = try self.parseGroup();
                 return .{ .substitution = cmds };
             },
             else => return error.SyntaxError,
         }
         return null;
+    }
+
+    fn parseGroup(self: *Parser) Error![]Command {
+        const start = self.index;
+        var brace_cnt: usize = 1;
+        const end = while (self.nextToken()) |tok| {
+            switch (tok.tag) {
+                .l_brace,
+                .l_angle_l_brace,
+                .r_angle_l_brace,
+                .backtick_l_brace,
+                => brace_cnt += 1,
+                .r_brace => {
+                    brace_cnt -|= 1;
+                    if (brace_cnt == 0) break self.index -| 1;
+                },
+                else => {},
+            }
+        } else return error.SyntaxError;
+
+        var parser: Parser = .{
+            .allocator = self.allocator,
+            .tokens = self.tokens[start..end],
+            .commands = try std.ArrayList(Command).initCapacity(self.allocator, 1),
+            .src = self.src,
+        };
+        return parser.parseTokens();
     }
 
     fn parseAssignments(self: *Parser) Error![]Assignment {
@@ -865,6 +873,36 @@ test "global assignment from command substitution" {
 
     const expect: Command = .{
         .assignment = .{ .key = "foo", .value = .{ .substitution = &.{cmd} } },
+    };
+    const cmds = try parse(cmdline, allocator);
+    try testing.expectEqual(1, cmds.len);
+    try testing.expectEqualDeep(expect, cmds[0]);
+}
+
+test "group" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const cmdline = "{echo foo; echo bar}";
+    const cmd1: Command = .{ .simple = .{
+        .arguments = &.{
+            .{ .word = "echo" },
+            .{ .word = "foo" },
+        },
+        .redirections = &.{},
+        .assignments = &.{},
+    } };
+    const cmd2: Command = .{ .simple = .{
+        .arguments = &.{
+            .{ .word = "echo" },
+            .{ .word = "bar" },
+        },
+        .redirections = &.{},
+        .assignments = &.{},
+    } };
+
+    const expect: Command = .{
+        .group = &.{ cmd1, cmd2 },
     };
     const cmds = try parse(cmdline, allocator);
     try testing.expectEqual(1, cmds.len);

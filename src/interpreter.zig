@@ -106,6 +106,7 @@ const Interpreter = struct {
                     try self.env.put(key, func.body);
                 },
                 .assignment => |assignment| try self.execAssignment(assignment),
+                .group => |grp| _ = try self.exec(grp),
             }
         }
         return self.exit;
