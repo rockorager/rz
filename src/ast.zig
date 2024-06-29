@@ -61,7 +61,7 @@ pub const Argument = union(enum) {
                 try writer.print("${s}{}", .{ variable.key, variable.fields });
             },
             .substitution => |sub| {
-                try writer.print("`\\{{}\\}", .{sub});
+                try writer.print("`{any}", .{sub});
             },
         }
     }
@@ -240,7 +240,7 @@ const Parser = struct {
                         => brace_cnt += 1,
                         .r_brace => {
                             brace_cnt -|= 1;
-                            if (brace_cnt == 0) break self.index;
+                            if (brace_cnt == 0) break self.index -| 1;
                         },
                         else => {},
                     }
@@ -293,6 +293,7 @@ const Parser = struct {
             switch (token.tag) {
                 .wsp => self.eat(.wsp),
                 .word,
+                .quoted_word,
                 .variable,
                 .variable_count,
                 .variable_string,
@@ -406,7 +407,11 @@ const Parser = struct {
         var count: usize = 1;
         const end: usize = while (self.nextToken()) |tok| {
             switch (tok.tag) {
-                .l_brace => count += 1,
+                .l_brace,
+                .l_angle_l_brace,
+                .r_angle_l_brace,
+                .backtick_l_brace,
+                => count += 1,
                 .r_brace => count -= 1,
                 else => continue,
             }
@@ -839,6 +844,27 @@ test "redirection" {
             },
             .assignments = &.{},
         },
+    };
+    const cmds = try parse(cmdline, allocator);
+    try testing.expectEqual(1, cmds.len);
+    try testing.expectEqualDeep(expect, cmds[0]);
+}
+
+test "global assignment from command substitution" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const cmdline = "foo=`{bar}";
+    const cmd: Command = .{ .simple = .{
+        .arguments = &.{
+            .{ .word = "bar" },
+        },
+        .redirections = &.{},
+        .assignments = &.{},
+    } };
+
+    const expect: Command = .{
+        .assignment = .{ .key = "foo", .value = .{ .substitution = &.{cmd} } },
     };
     const cmds = try parse(cmdline, allocator);
     try testing.expectEqual(1, cmds.len);

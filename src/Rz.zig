@@ -5,6 +5,7 @@ const assert = std.debug.assert;
 const vaxis = @import("vaxis");
 const ast = @import("ast.zig");
 const interpreter = @import("interpreter.zig");
+const prompt = @import("prompt.zig");
 
 const Line = @import("Line.zig");
 
@@ -21,6 +22,8 @@ allocator: std.mem.Allocator,
 vx: vaxis.Vaxis,
 tty: vaxis.Tty,
 env: std.process.EnvMap,
+/// A reference to the prompt string
+prompt_str: ?[]const u8 = null,
 
 pub fn init(allocator: std.mem.Allocator) !Rz {
     var env = try std.process.getEnvMap(allocator);
@@ -29,6 +32,7 @@ pub fn init(allocator: std.mem.Allocator) !Rz {
     try env.put("nl", "\n");
     try env.put("tab", "\t");
     try env.put("prompt", "> \x01\x01\x01");
+    try env.put("status", "0");
     if (env.get("HOME")) |home| {
         try env.put("home", home);
     }
@@ -56,6 +60,9 @@ pub fn deinit(self: *Rz) void {
     self.vx.deinit(self.allocator, self.tty.anyWriter());
     self.tty.deinit();
     self.env.deinit();
+    if (self.prompt_str) |str| {
+        self.allocator.free(str);
+    }
 }
 
 pub fn run(self: *Rz) !u8 {
@@ -119,6 +126,8 @@ pub fn run(self: *Rz) !u8 {
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    try self.updatePrompt(&zedit);
+
     while (true) {
         const event = loop.nextEvent();
         switch (event) {
@@ -150,6 +159,7 @@ pub fn run(self: *Rz) !u8 {
                     // vaxis
                     if (exit) |code| return code;
 
+                    try self.updatePrompt(&zedit);
                     const win = self.vx.window();
                     win.clear();
                     try self.vx.render(any);
@@ -194,4 +204,43 @@ fn resetTty(tty: vaxis.Tty) void {
 
 fn makeRaw(tty: vaxis.Tty) !void {
     _ = try vaxis.Tty.makeRaw(tty.fd);
+}
+
+fn updatePrompt(self: *Rz, edit: *Line) !void {
+    const status = self.env.get("status") orelse "0";
+    _ = try interpreter.exec(self.allocator, "prompt", &self.env);
+    try self.env.put("status", status);
+    const promptstr = self.env.get("prompt") orelse return;
+    if (self.prompt_str) |str| {
+        self.allocator.free(str);
+    }
+    self.prompt_str = try self.allocator.dupe(u8, promptstr);
+
+    var iter = std.mem.splitScalar(u8, self.prompt_str.?, '\x01');
+    const left = iter.first();
+    const top_left = iter.next();
+    const top_right = iter.next();
+    const right = iter.next();
+
+    var segs = std.ArrayList(vaxis.Segment).init(self.allocator);
+    defer segs.deinit();
+    var i: usize = 0;
+    var style: vaxis.Style = .{};
+    while (i < left.len) {
+        const esc = std.mem.indexOfScalarPos(u8, left, i, '\x1b') orelse {
+            try segs.append(.{ .text = left[i..], .style = style });
+            i = left.len;
+            break;
+        };
+        try segs.append(.{ .text = left[i..esc], .style = style });
+        const m = std.mem.indexOfScalarPos(u8, left, esc + 1, 'm') orelse return error.FormatError;
+        const params: prompt.CSI = .{ .params = left[esc + 2 .. m] };
+        prompt.sgr(&style, params);
+        i = m + 1;
+    }
+
+    try edit.update(.{ .prompt = .{ .left = segs.items } });
+    if (top_left) |_| {}
+    if (top_right) |_| {}
+    if (right) |_| {}
 }

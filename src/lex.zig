@@ -185,7 +185,10 @@ pub const Tokenizer = struct {
                 while (self.readByte()) |_b| {
                     switch (_b) {
                         '\'' => single_quote = !single_quote,
-                        else => if (single_quote) break,
+                        else => if (single_quote) {
+                            self.index -|= 1;
+                            break;
+                        },
                     }
                 }
                 token.loc.end = self.index;
@@ -360,6 +363,19 @@ test "quoted word" {
         .{ .tag = .wsp, .loc = .{ .start = 1, .end = 2 } },
         .{ .tag = .quoted_word, .loc = .{ .start = 2, .end = input.len } },
         .{ .tag = .eof, .loc = .{ .start = input.len, .end = input.len } },
+    };
+    for (tokens) |expected| {
+        const actual = tokenizer.next();
+        try std.testing.expectEqual(expected, actual);
+    }
+}
+
+test "quoted word single space" {
+    const input = "' ' ";
+    var tokenizer = Tokenizer.init(input);
+    const tokens = [_]Token{
+        .{ .tag = .quoted_word, .loc = .{ .start = 0, .end = 3 } },
+        .{ .tag = .wsp, .loc = .{ .start = 3, .end = 4 } },
     };
     for (tokens) |expected| {
         const actual = tokenizer.next();

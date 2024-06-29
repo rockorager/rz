@@ -94,6 +94,8 @@ const Interpreter = struct {
     exit: ?u8 = null,
     /// The saved value of $*. We save it here and restore as needed
     arg_env: ?[]const u8 = null,
+    /// In prompt mode, we prevent anything from setting the $status var
+    prompt_mode: bool = false,
 
     fn exec(self: *Interpreter, cmds: []const ast.Command) Error!?u8 {
         for (cmds) |cmd| {
@@ -189,6 +191,8 @@ const Interpreter = struct {
         var process = std.process.Child.init(args, self.arena);
         process.env_map = self.env;
         const exit = process.spawnAndWait() catch |err| {
+            // TODO: map error codes
+            self.setStatus(1) catch return;
             switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.FileNotFound => {
@@ -198,8 +202,6 @@ const Interpreter = struct {
                 error.AccessDenied => log.err("access denied", .{}),
                 else => log.err("unexpected error: {}", .{err}),
             }
-            // TODO: map error codes
-            self.setStatus(1) catch return;
             return;
         };
         switch (exit) {
@@ -209,6 +211,7 @@ const Interpreter = struct {
     }
 
     fn execFunction(self: *Interpreter, args: []const []const u8) Error!bool {
+        if (std.mem.eql(u8, args[0], "prompt")) self.prompt_mode = true;
         const key = try std.fmt.allocPrint(self.arena, "fn#{s}", .{args[0]});
         if (self.env.get(key)) |val| {
             if (main.args.verbose)
@@ -303,6 +306,7 @@ const Interpreter = struct {
     }
 
     fn setStatus(self: *Interpreter, status: u8) Allocator.Error!void {
+        if (self.prompt_mode) return;
         const str = try std.fmt.allocPrint(self.arena, "{d}", .{status});
         try self.env.put("status", str);
     }

@@ -11,6 +11,12 @@ const Unicode = vaxis.Unicode;
 /// The events that this widget handles
 const Event = union(enum) {
     key_press: Key,
+    prompt: union(enum) {
+        left: []const vaxis.Segment,
+        right: []const vaxis.Segment,
+        top_left: []const vaxis.Segment,
+        top_right: []const vaxis.Segment,
+    },
 };
 
 // Index of our cursor
@@ -27,21 +33,27 @@ prev_cursor_idx: usize = 0,
 unicode: *const Unicode,
 
 prompt: struct {
-    left: ?[]vaxis.Segment = null,
-    right: ?[]vaxis.Segment = null,
-    top_left: ?[]vaxis.Segment = null,
-    top_right: ?[]vaxis.Segment = null,
-} = .{},
+    left: std.ArrayList(vaxis.Segment),
+    right: std.ArrayList(vaxis.Segment),
+    top_left: std.ArrayList(vaxis.Segment),
+    top_right: std.ArrayList(vaxis.Segment),
+},
 
 pub fn init(alloc: std.mem.Allocator, unicode: *const Unicode) Line {
-    return .{
-        .buf = std.ArrayList(u8).init(alloc),
-        .unicode = unicode,
-    };
+    return .{ .buf = std.ArrayList(u8).init(alloc), .unicode = unicode, .prompt = .{
+        .left = std.ArrayList(vaxis.Segment).init(alloc),
+        .right = std.ArrayList(vaxis.Segment).init(alloc),
+        .top_left = std.ArrayList(vaxis.Segment).init(alloc),
+        .top_right = std.ArrayList(vaxis.Segment).init(alloc),
+    } };
 }
 
 pub fn deinit(self: *Line) void {
     self.buf.deinit();
+    self.prompt.left.deinit();
+    self.prompt.right.deinit();
+    self.prompt.top_left.deinit();
+    self.prompt.top_right.deinit();
 }
 
 pub fn update(self: *Line, event: Event) !void {
@@ -67,6 +79,17 @@ pub fn update(self: *Line, event: Event) !void {
                 try self.deleteToStart();
             } else if (key.text) |text| {
                 try self.insertSliceAtCursor(text);
+            }
+        },
+        .prompt => |prompt| {
+            switch (prompt) {
+                .left => |val| {
+                    self.prompt.left.clearRetainingCapacity();
+                    try self.prompt.left.appendSlice(val);
+                },
+                .right => {},
+                .top_left => {},
+                .top_right => {},
             }
         },
     }
@@ -112,8 +135,8 @@ pub fn draw(self: *Line, win: Window) void {
     var col: usize = 0;
     var row: usize = 0;
 
-    if (self.prompt.left) |prompt| {
-        const result = try win.print(prompt, .{ .wrap = .grapheme });
+    if (self.prompt.left.items.len > 0) {
+        const result = try win.print(self.prompt.left.items, .{ .wrap = .grapheme });
         col = result.col;
         row = result.row;
     } else {
