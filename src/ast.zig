@@ -1,4 +1,5 @@
 const std = @import("std");
+const posix = std.posix;
 const testing = std.testing;
 const lex = @import("lex.zig");
 const Token = lex.Token;
@@ -17,6 +18,12 @@ pub const Command = union(enum) {
     group: []const Command, // {foo;bar}
     if_zero, // &&
     if_nonzero, // ||
+    pipe: Pipe,
+};
+
+pub const Pipe = struct {
+    lhs: *const Command,
+    rhs: *const Command,
 };
 
 pub const Argument = union(enum) {
@@ -85,7 +92,7 @@ pub const Redirection = struct {
         out,
     },
     append: bool,
-    fd: std.posix.fd_t,
+    fd: posix.fd_t,
     /// File *could* be more information for redirection, however this is easier parsed at execution
     /// eg: it could be a concat of the form [2^=^1], which resolves to [2=1]. The interpreter will need
     /// to handle this
@@ -126,6 +133,9 @@ const Parser = struct {
     tokens: []const Token,
     /// token index
     index: usize = 0,
+    /// When we encounter a pipe, we allocate our previous command onto the stack and store it here.
+    /// When we get our next command we will construct our pipe command
+    pipe: ?*const Command = null,
 
     fn parseTokens(self: *Parser) Error![]Command {
         while (self.peekToken()) |token| {
@@ -141,16 +151,23 @@ const Parser = struct {
                     self.index += 1;
                     // parse group wants us to consume the first brace
                     const cmds = try self.parseGroup();
-                    try self.commands.append(.{ .group = cmds });
+                    try self.appendCommand(.{ .group = cmds });
                 },
                 .keyword_fn => try self.parseFn(),
                 .ampersand_ampersand => {
                     self.index += 1;
-                    try self.commands.append(.if_zero);
+                    try self.appendCommand(.if_zero);
                 },
                 .pipe_pipe => {
                     self.index += 1;
-                    try self.commands.append(.if_nonzero);
+                    try self.appendCommand(.if_nonzero);
+                },
+                .pipe => {
+                    if (self.commands.items.len == 0) return error.SyntaxError;
+                    self.index += 1;
+                    const lhs = try self.allocator.create(Command);
+                    lhs.* = self.commands.pop();
+                    self.pipe = lhs;
                 },
                 else => {
                     log.debug("unhandled first token: {}", .{token.tag});
@@ -159,6 +176,18 @@ const Parser = struct {
             }
         }
         return self.commands.items;
+    }
+
+    fn appendCommand(self: *Parser, cmd: Command) Error!void {
+        if (self.pipe) |lhs| {
+            const rhs = try self.allocator.create(Command);
+            rhs.* = cmd;
+            const pipe: Command = .{ .pipe = .{ .lhs = lhs, .rhs = rhs } };
+            try self.commands.append(pipe);
+            self.pipe = null;
+            return;
+        }
+        try self.commands.append(cmd);
     }
 
     fn tokenContent(self: Parser, loc: Token.Loc) []const u8 {
@@ -350,10 +379,10 @@ const Parser = struct {
 
         switch (args.items.len) {
             0 => switch (locals.len) {
-                1 => try self.commands.append(.{ .assignment = locals[0] }),
+                1 => try self.appendCommand(.{ .assignment = locals[0] }),
                 else => {},
             },
-            else => try self.commands.append(.{
+            else => try self.appendCommand(.{
                 .simple = .{
                     .arguments = args.items,
                     .redirections = redirs.items,
@@ -371,17 +400,17 @@ const Parser = struct {
             .l_angle => {
                 redir.direction = .in;
                 redir.append = false;
-                redir.fd = std.posix.STDIN_FILENO;
+                redir.fd = posix.STDIN_FILENO;
             },
             .r_angle => {
                 redir.direction = .out;
                 redir.append = false;
-                redir.fd = std.posix.STDOUT_FILENO;
+                redir.fd = posix.STDOUT_FILENO;
             },
             .r_angle_r_angle => {
                 redir.direction = .out;
                 redir.append = true;
-                redir.fd = std.posix.STDOUT_FILENO;
+                redir.fd = posix.STDOUT_FILENO;
             },
             else => unreachable,
         }
@@ -439,7 +468,7 @@ const Parser = struct {
             }
             if (count == 0) break tok.loc.start;
         } else return error.SyntaxError;
-        try self.commands.append(.{ .function = .{ .name = name, .body = self.src[start..end] } });
+        try self.appendCommand(.{ .function = .{ .name = name, .body = self.src[start..end] } });
     }
 
     fn want(self: *Parser, tag: Token.Tag) !Token {
@@ -842,7 +871,7 @@ test "redirection" {
                 .{
                     .direction = .out,
                     .append = false,
-                    .fd = std.posix.STDOUT_FILENO,
+                    .fd = posix.STDOUT_FILENO,
                     .file = .{ .word = "foo" },
                 },
                 .{
@@ -854,7 +883,7 @@ test "redirection" {
                 .{
                     .direction = .in,
                     .append = false,
-                    .fd = std.posix.STDIN_FILENO,
+                    .fd = posix.STDIN_FILENO,
                     .file = .{ .concatenate = .{
                         .lhs = &.{ .word = "[2" },
                         .rhs = &.{ .concatenate = .{
@@ -979,4 +1008,32 @@ test "||" {
     try testing.expectEqualDeep(cmd1, cmds[0]);
     try testing.expectEqualDeep(cmd2, cmds[1]);
     try testing.expectEqualDeep(cmd3, cmds[2]);
+}
+
+test "pipe" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const cmdline = "ls | echo foo";
+    const cmd1: Command = .{ .simple = .{
+        .arguments = &.{
+            .{ .word = "ls" },
+        },
+        .redirections = &.{},
+        .assignments = &.{},
+    } };
+    const cmd2: Command = .{ .simple = .{
+        .arguments = &.{
+            .{ .word = "echo" },
+            .{ .word = "foo" },
+        },
+        .redirections = &.{},
+        .assignments = &.{},
+    } };
+
+    const pipe: Pipe = .{ .lhs = &cmd1, .rhs = &cmd2 };
+    const cmd: Command = .{ .pipe = pipe };
+    const cmds = try parse(cmdline, allocator);
+    try testing.expectEqual(1, cmds.len);
+    try testing.expectEqualDeep(cmd, cmds[0]);
 }

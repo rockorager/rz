@@ -1,4 +1,5 @@
 const std = @import("std");
+const posix = std.posix;
 const testing = std.testing;
 const ast = @import("ast.zig");
 const Allocator = std.mem.Allocator;
@@ -11,7 +12,7 @@ pub const Error = error{
     SyntaxError,
     BuiltinCommandError,
     OutOfMemory,
-} || std.posix.ChangeCurDirError;
+} || posix.ChangeCurDirError;
 
 const Builtin = enum {
     cd,
@@ -47,45 +48,45 @@ pub fn exec(allocator: std.mem.Allocator, src: []const u8, env: *std.process.Env
     };
 }
 
-fn saveFds() [3]std.posix.fd_t {
-    var fds: [3]std.posix.fd_t = .{
-        std.posix.STDIN_FILENO,
-        std.posix.STDOUT_FILENO,
-        std.posix.STDERR_FILENO,
+fn saveFds() [3]posix.fd_t {
+    var fds: [3]posix.fd_t = .{
+        posix.STDIN_FILENO,
+        posix.STDOUT_FILENO,
+        posix.STDERR_FILENO,
     };
-    fds[0] = std.posix.dup(fds[0]) catch |err| blk: {
+    fds[0] = posix.dup(fds[0]) catch |err| blk: {
         log.err("dup error: {}", .{err});
-        break :blk std.posix.STDIN_FILENO;
+        break :blk posix.STDIN_FILENO;
     };
-    fds[1] = std.posix.dup(fds[1]) catch |err| blk: {
+    fds[1] = posix.dup(fds[1]) catch |err| blk: {
         log.err("dup error: {}", .{err});
-        break :blk std.posix.STDOUT_FILENO;
+        break :blk posix.STDOUT_FILENO;
     };
-    fds[2] = std.posix.dup(fds[2]) catch |err| blk: {
+    fds[2] = posix.dup(fds[2]) catch |err| blk: {
         log.err("dup error: {}", .{err});
-        break :blk std.posix.STDERR_FILENO;
+        break :blk posix.STDERR_FILENO;
     };
     return fds;
 }
 
-fn restoreFds(fds: [3]std.posix.fd_t) void {
-    if (fds[0] != std.posix.STDIN_FILENO) {
-        std.posix.dup2(fds[0], std.posix.STDIN_FILENO) catch |err| {
+fn restoreFds(fds: [3]posix.fd_t) void {
+    if (fds[0] != posix.STDIN_FILENO) {
+        posix.dup2(fds[0], std.posix.STDIN_FILENO) catch |err| {
             log.err("dup2 error: {}", .{err});
         };
-        std.posix.close(fds[0]);
+        posix.close(fds[0]);
     }
-    if (fds[1] != std.posix.STDOUT_FILENO) {
-        std.posix.dup2(fds[1], std.posix.STDOUT_FILENO) catch |err| {
+    if (fds[1] != posix.STDOUT_FILENO) {
+        posix.dup2(fds[1], std.posix.STDOUT_FILENO) catch |err| {
             log.err("dup2 error: {}", .{err});
         };
-        std.posix.close(fds[1]);
+        posix.close(fds[1]);
     }
-    if (fds[2] != std.posix.STDERR_FILENO) {
-        std.posix.dup2(fds[2], std.posix.STDERR_FILENO) catch |err| {
+    if (fds[2] != posix.STDERR_FILENO) {
+        posix.dup2(fds[2], std.posix.STDERR_FILENO) catch |err| {
             log.err("dup2 error: {}", .{err});
         };
-        std.posix.close(fds[2]);
+        posix.close(fds[2]);
     }
 }
 const Interpreter = struct {
@@ -125,6 +126,7 @@ const Interpreter = struct {
                             return 0;
                     }
                 },
+                .pipe => {},
             }
         }
         return self.exit;
@@ -167,9 +169,9 @@ const Interpreter = struct {
                 const lhs = std.fmt.parseUnsigned(u16, lhs_buf, 10) catch return error.SyntaxError;
                 if (iter.next()) |rhs_buf| {
                     const rhs = std.fmt.parseUnsigned(u16, rhs_buf, 10) catch return error.SyntaxError;
-                    std.posix.dup2(rhs, lhs) catch @panic("TODO");
+                    posix.dup2(rhs, lhs) catch @panic("TODO");
                 } else {
-                    std.posix.close(lhs);
+                    posix.close(lhs);
                 }
             } else {
                 const dir = std.fs.cwd();
@@ -177,18 +179,18 @@ const Interpreter = struct {
                     .in => {
                         const fd = dir.openFile(file[0], .{}) catch @panic("TODO");
                         defer fd.close();
-                        std.posix.dup2(fd.handle, redir.fd) catch @panic("TODO");
+                        posix.dup2(fd.handle, redir.fd) catch @panic("TODO");
                     },
                     .out => {
-                        const flags: std.posix.O = .{
+                        const flags: posix.O = .{
                             .ACCMODE = .WRONLY,
                             .CREAT = true,
                             .TRUNC = !redir.append,
                             .APPEND = redir.append,
                         };
                         const fd = createFile(dir, file[0], flags) catch @panic("TODO");
-                        defer std.posix.close(fd);
-                        std.posix.dup2(fd, redir.fd) catch @panic("TODO");
+                        defer posix.close(fd);
+                        posix.dup2(fd, redir.fd) catch @panic("TODO");
                     },
                 }
             }
@@ -418,32 +420,32 @@ const Interpreter = struct {
             .substitution => |cmds| {
                 // We run the commands as usual, but we gather all stdout. We do this with a simple
                 // pipe
-                const fds = std.posix.pipe() catch @panic("TODO");
+                const fds = posix.pipe() catch @panic("TODO");
                 const read_end = fds[0];
                 const write_end = fds[1];
                 defer {
-                    std.posix.close(read_end);
-                    std.posix.close(write_end);
+                    posix.close(read_end);
+                    posix.close(write_end);
                 }
 
                 {
                     // Set read_end to nonblocking
-                    const flags = std.posix.fcntl(read_end, std.posix.F.GETFL, 0) catch @panic("TODO");
-                    _ = std.posix.fcntl(
+                    const flags = posix.fcntl(read_end, std.posix.F.GETFL, 0) catch @panic("TODO");
+                    _ = posix.fcntl(
                         read_end,
-                        std.posix.F.SETFL,
-                        flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })),
+                        posix.F.SETFL,
+                        flags | @as(u32, @bitCast(posix.O{ .NONBLOCK = true })),
                     ) catch @panic("TODO");
                 }
 
                 const saved = saveFds();
                 defer restoreFds(saved);
-                std.posix.dup2(write_end, std.posix.STDOUT_FILENO) catch @panic("TODO");
+                posix.dup2(write_end, std.posix.STDOUT_FILENO) catch @panic("TODO");
                 _ = try self.exec(cmds);
                 var buf: [4096]u8 = undefined;
                 var stdout = std.ArrayList(u8).init(self.arena);
                 while (true) {
-                    const n = std.posix.read(read_end, &buf) catch break;
+                    const n = posix.read(read_end, &buf) catch break;
                     if (n == 0) break;
                     try stdout.appendSlice(buf[0..n]);
                 }
@@ -471,9 +473,9 @@ const Interpreter = struct {
     }
 };
 
-fn createFile(dir: std.fs.Dir, path: []const u8, flags: std.posix.O) !std.posix.fd_t {
-    const cpath = try std.posix.toPosixPath(path);
-    return std.posix.openatZ(dir.fd, &cpath, flags, std.fs.File.default_mode);
+fn createFile(dir: std.fs.Dir, path: []const u8, flags: posix.O) !std.posix.fd_t {
+    const cpath = try posix.toPosixPath(path);
+    return posix.openatZ(dir.fd, &cpath, flags, std.fs.File.default_mode);
 }
 
 test "resolve arguments" {
