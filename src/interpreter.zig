@@ -126,7 +126,11 @@ const Interpreter = struct {
                             return 0;
                     }
                 },
-                .pipe => {},
+                .pipe => |pipe| {
+                    const st = try self.execPipe(pipe);
+                    _ = st; // autofix
+                    return null;
+                },
             }
         }
         return self.exit;
@@ -304,6 +308,54 @@ const Interpreter = struct {
                 return true;
             },
         }
+    }
+
+    fn execPipe(self: *Interpreter, cmd: ast.Pipe) Error!u8 {
+        const read_end, const write_end = posix.pipe() catch @panic("TODO");
+
+        const lhs: posix.fd_t = lhs: {
+            const pid = posix.fork() catch @panic("TODO");
+            switch (pid) {
+                0 => {
+                    // we don't need the read_end in lhs
+                    posix.close(read_end);
+                    // Dupe our stdout to the pipe
+                    posix.dup2(write_end, posix.STDOUT_FILENO) catch @panic("TODO");
+                    // Now the write_end fd is not needed
+                    posix.close(write_end);
+                    _ = try self.exec(&.{cmd.lhs.*});
+                    std.process.exit(0);
+                },
+                else => break :lhs pid, // we are the parent. Keep the child pid
+            }
+        };
+        const rhs: posix.fd_t = rhs: {
+            const pid = posix.fork() catch @panic("TODO");
+            switch (pid) {
+                0 => {
+                    // we don't need the write_end in rhs
+                    posix.close(write_end);
+                    // Dupe our stdin to the pipe
+                    posix.dup2(read_end, posix.STDIN_FILENO) catch @panic("TODO");
+                    // Now the read_end fd is not needed
+                    posix.close(read_end);
+                    _ = try self.exec(&.{cmd.rhs.*});
+                    std.process.exit(0);
+                },
+                else => break :rhs pid, // we are the parent. Keep the child pid
+            }
+        };
+
+        // In the parent, we don't need either pipe.
+        posix.close(read_end);
+        posix.close(write_end);
+
+        // wait for the commands to finish
+        const lhs_stat = posix.waitpid(lhs, 0);
+        _ = lhs_stat; // autofix
+        const rhs_stat = posix.waitpid(rhs, 0);
+        _ = rhs_stat; // autofix
+        return 0;
     }
 
     fn restoreArgEnv(self: *Interpreter) void {
