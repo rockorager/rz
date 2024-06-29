@@ -141,8 +141,10 @@ const Parser = struct {
         while (self.peekToken()) |token| {
             switch (token.tag) {
                 .eof => break,
-                .wsp => self.index += 1,
-                .comment => self.index += 1,
+                .wsp,
+                .comment,
+                .newline,
+                => self.index += 1,
                 .word,
                 .variable,
                 .backtick_l_brace,
