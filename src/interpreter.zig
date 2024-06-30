@@ -19,7 +19,8 @@ const Builtin = enum {
     exit,
 };
 
-/// executes `src` as an rz script. env will be updated as necessary
+/// executes `src` as an rz script. env will be updated as necessary. If a u8 is returned, the shell
+/// must exit with that as it's exit code
 pub fn exec(allocator: std.mem.Allocator, src: []const u8, env: *std.process.EnvMap) Allocator.Error!?u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -100,34 +101,42 @@ const Interpreter = struct {
 
     fn exec(self: *Interpreter, cmds: []const ast.Command) Error!?u8 {
         for (cmds) |cmd| {
-            switch (cmd) {
-                .simple => |simple| try self.execSimple(simple),
-                .function => |func| {
-                    const key = try std.fmt.allocPrint(self.arena, "fn#{s}", .{func.name});
-                    try self.env.put(key, func.body);
-                },
-                .assignment => |assignment| try self.execAssignment(assignment),
-                .group => |grp| _ = try self.exec(grp),
-                .if_nonzero,
-                .if_zero,
-                => |bin| _ = try self.execBinary(bin, std.meta.activeTag(cmd)),
-                .pipe => |pipe| {
-                    const st = try self.execPipe(pipe);
-                    _ = st; // autofix
-                    return null;
-                },
-            }
+            const code = try self.execCommand(cmd);
+            if (self.exit) |exit| return exit;
+            if (self.prompt_mode) continue;
+            try self.setStatus(code);
         }
-        return self.exit;
+        return null;
+    }
+
+    fn execCommand(self: *Interpreter, cmd: ast.Command) Error!u8 {
+        switch (cmd) {
+            .simple => |simple| return self.execSimple(simple),
+            .function => |func| {
+                const key = try std.fmt.allocPrint(self.arena, "fn#{s}", .{func.name});
+                try self.env.put(key, func.body);
+            },
+            .assignment => |assignment| try self.execAssignment(assignment),
+            .group => |grp| {
+                const code = try self.exec(grp) orelse 0;
+                return code;
+            },
+            .if_nonzero,
+            .if_zero,
+            => |bin| return self.execBinary(bin, std.meta.activeTag(cmd)),
+            .pipe => |pipe| return self.execPipe(pipe),
+        }
+        return 0;
     }
 
     fn execAssignment(self: *Interpreter, cmd: ast.Assignment) Error!void {
+        // TODO: keep $path and $PATH in sync
         const value = try self.resolveArg(cmd.value);
         const storage = try std.mem.join(self.arena, "\x01", value);
         try self.env.put(cmd.key, storage);
     }
 
-    fn execSimple(self: *Interpreter, cmd: ast.Simple) Error!void {
+    fn execSimple(self: *Interpreter, cmd: ast.Simple) Error!u8 {
         for (cmd.assignments) |assignment| {
             try self.execAssignment(assignment);
         }
@@ -142,7 +151,7 @@ const Interpreter = struct {
             const resolved = try self.resolveArg(arg);
             try arguments.appendSlice(resolved);
         }
-        if (arguments.items.len == 0) return;
+        if (arguments.items.len == 0) return 0;
 
         for (cmd.redirections) |redir| {
             const file = try self.resolveArg(redir.file);
@@ -185,64 +194,38 @@ const Interpreter = struct {
             }
         }
 
-        const builtin = std.mem.eql(u8, "builtin", arguments.items[0]);
+        return self.execFunction(arguments.items);
+    }
 
-        const args = if (builtin) blk: {
-            if (arguments.items.len == 1) return;
-            break :blk arguments.items[1..];
-        } else arguments.items;
+    /// Attempts to exec a function. If there is no function, this will try a builtin. If there is
+    /// no builtin, this will try a command in $path
+    fn execFunction(self: *Interpreter, args: []const []const u8) Error!u8 {
+        if (std.mem.eql(u8, args[0], "prompt"))
+            self.prompt_mode = true
+        else if (std.mem.eql(u8, args[0], "builtin"))
+            return self.execBuiltin(args[1..]);
 
-        if (!builtin and try self.execFunction(args)) return;
-
-        if (try self.execBuiltin(args)) return;
-
+        const key = try std.fmt.allocPrint(self.arena, "fn#{s}", .{args[0]});
+        const body = self.env.get(key) orelse
+            return self.execBuiltin(args);
         if (main.args.verbose)
-            log.err("executing command: '{s}'", .{args});
-        var process = std.process.Child.init(args, self.arena);
-        process.env_map = self.env;
-        const exit = process.spawnAndWait() catch |err| {
-            // TODO: map error codes
-            self.setStatus(1) catch return;
+            log.err("executing function: '{s}'", .{args});
+        try self.setArgEnv(args);
+        defer self.restoreArgEnv();
+        const cmds = ast.parse(body, self.arena) catch |err| {
             switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.FileNotFound => {
-                    log.err("command '{s}' not found", .{arguments.items[0]});
-                    self.setStatus(127) catch return;
-                },
-                error.AccessDenied => log.err("access denied", .{}),
-                else => log.err("unexpected error: {}", .{err}),
+                error.SyntaxError => log.err("syntax error", .{}),
             }
-            return;
+            return 1;
         };
-        switch (exit) {
-            .Exited => |val| try self.setStatus(val),
-            else => {},
-        }
+        const exit = try self.exec(cmds) orelse 0;
+        return exit;
     }
 
-    fn execFunction(self: *Interpreter, args: []const []const u8) Error!bool {
-        if (std.mem.eql(u8, args[0], "prompt")) self.prompt_mode = true;
-        const key = try std.fmt.allocPrint(self.arena, "fn#{s}", .{args[0]});
-        if (self.env.get(key)) |val| {
-            if (main.args.verbose)
-                log.err("executing function: '{s}'", .{args});
-            try self.setArgEnv(args);
-            defer self.restoreArgEnv();
-            const cmds = ast.parse(val, self.arena) catch |err| {
-                switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.SyntaxError => log.err("syntax error", .{}),
-                }
-                return true;
-            };
-            _ = try self.exec(cmds);
-            return true;
-        }
-        return false;
-    }
-
-    fn execBuiltin(self: *Interpreter, args: []const []const u8) Error!bool {
-        const cmd = std.meta.stringToEnum(Builtin, args[0]) orelse return false;
+    fn execBuiltin(self: *Interpreter, args: []const []const u8) Error!u8 {
+        const cmd = std.meta.stringToEnum(Builtin, args[0]) orelse
+            return self.execChild(args);
         if (main.args.verbose)
             log.err("executing builtin: '{s}'", .{args});
         switch (cmd) {
@@ -251,15 +234,16 @@ const Interpreter = struct {
                     if (self.env.get("home")) |home| {
                         try std.process.changeCurDir(home);
                     }
-                    return true;
+                    return 0;
                 }
                 if (args[1][0] == '/') {
                     try std.process.changeCurDir(args[1]);
-                    return true;
+                    return 0;
                 }
+                errdefer |err| log.err("error {}", .{err});
                 var components = std.ArrayList([]const u8).init(self.arena);
                 // we add a / because path.join doesn't return an absolute path
-                components.append("/") catch return true;
+                try components.append("/");
                 const cwd = std.process.getCwdAlloc(self.arena) catch |err| {
                     switch (err) {
                         Allocator.Error.OutOfMemory => return error.OutOfMemory,
@@ -269,7 +253,7 @@ const Interpreter = struct {
                 var iter = std.mem.splitScalar(u8, cwd, '/');
                 while (iter.next()) |v| {
                     if (v.len == 0) continue;
-                    components.append(v) catch return true;
+                    try components.append(v);
                 }
                 iter = std.mem.splitScalar(u8, args[1], '/');
                 while (iter.next()) |p| {
@@ -277,21 +261,45 @@ const Interpreter = struct {
                         components.items.len -|= 1;
                         continue;
                     }
-                    components.append(p) catch return true;
+                    try components.append(p);
                 }
 
                 const path = try std.fs.path.join(self.arena, components.items);
                 try std.process.changeCurDir(path);
-                return true;
+                return 0;
             },
             .exit => {
                 self.exit = if (args.len > 1)
                     std.fmt.parseUnsigned(u8, args[1], 10) catch return error.SyntaxError
                 else
                     0;
-                try self.setStatus(self.exit.?);
-                return true;
+                return self.exit.?;
             },
+        }
+    }
+
+    fn execChild(self: *Interpreter, args: []const []const u8) Error!u8 {
+        if (main.args.verbose)
+            log.err("executing command: '{s}'", .{args});
+        var process = std.process.Child.init(args, self.arena);
+        process.env_map = self.env;
+        const exit = process.spawnAndWait() catch |err| {
+            switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.FileNotFound => {
+                    log.err("command '{s}' not found", .{args[0]});
+                    return 127;
+                },
+                error.AccessDenied => log.err("access denied", .{}),
+                else => log.err("unexpected error: {}", .{err}),
+            }
+            return 1;
+        };
+        switch (exit) {
+            .Exited => |val| {
+                return val;
+            },
+            else => return 1,
         }
     }
 
