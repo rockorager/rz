@@ -108,24 +108,9 @@ const Interpreter = struct {
                 },
                 .assignment => |assignment| try self.execAssignment(assignment),
                 .group => |grp| _ = try self.exec(grp),
-                .if_zero => {
-                    if (self.env.get("status")) |status| {
-                        if (std.mem.eql(u8, "0", status))
-                            continue
-                        else {
-                            const result = std.fmt.parseUnsigned(u8, status, 10) catch unreachable;
-                            return result;
-                        }
-                    }
-                },
-                .if_nonzero => {
-                    if (self.env.get("status")) |status| {
-                        if (!std.mem.eql(u8, "0", status))
-                            continue
-                        else
-                            return 0;
-                    }
-                },
+                .if_nonzero,
+                .if_zero,
+                => |bin| _ = try self.execBinary(bin, std.meta.activeTag(cmd)),
                 .pipe => |pipe| {
                     const st = try self.execPipe(pipe);
                     _ = st; // autofix
@@ -310,7 +295,25 @@ const Interpreter = struct {
         }
     }
 
-    fn execPipe(self: *Interpreter, cmd: ast.Pipe) Error!u8 {
+    fn execBinary(self: *Interpreter, cmd: ast.Binary, tag: std.meta.Tag(ast.Command)) Error!u8 {
+        _ = try self.exec(&.{cmd.lhs.*});
+        if (self.env.get("status")) |status| {
+            if (std.mem.eql(u8, "0", status))
+                switch (tag) {
+                    .if_zero => _ = try self.exec(&.{cmd.rhs.*}),
+                    else => return 0,
+                }
+            else {
+                switch (tag) {
+                    .if_nonzero => _ = try self.exec(&.{cmd.rhs.*}),
+                    else => return 0,
+                }
+            }
+        }
+        return 0;
+    }
+
+    fn execPipe(self: *Interpreter, cmd: ast.Binary) Error!u8 {
         const read_end, const write_end = posix.pipe() catch @panic("TODO");
 
         const lhs: posix.fd_t = lhs: {

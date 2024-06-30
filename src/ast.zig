@@ -16,12 +16,12 @@ pub const Command = union(enum) {
     function: Function, // fn foo {...}
     assignment: Assignment, // foo=$bar
     group: []const Command, // {foo;bar}
-    if_zero, // &&
-    if_nonzero, // ||
-    pipe: Pipe,
+    if_zero: Binary, // &&
+    if_nonzero: Binary, // ||
+    pipe: Binary,
 };
 
-pub const Pipe = struct {
+pub const Binary = struct {
     lhs: *const Command,
     rhs: *const Command,
 };
@@ -126,6 +126,12 @@ pub fn parse(src: []const u8, arena: std.mem.Allocator) Error![]Command {
     return parser.parseTokens();
 }
 
+const BinaryCommands = enum {
+    if_zero,
+    if_nonzero,
+    pipe,
+};
+
 const Parser = struct {
     src: []const u8,
     allocator: std.mem.Allocator,
@@ -133,9 +139,9 @@ const Parser = struct {
     tokens: []const Token,
     /// token index
     index: usize = 0,
-    /// When we encounter a pipe, we allocate our previous command onto the stack and store it here.
-    /// When we get our next command we will construct our pipe command
-    pipe: ?*const Command = null,
+    /// When we encounter a binary, set the kind here. After we parse the rhs, we catch it and
+    /// create a binary from the last command in commands.items
+    binary: ?BinaryCommands = null,
 
     fn parseTokens(self: *Parser) Error![]Command {
         while (self.peekToken()) |token| {
@@ -156,20 +162,18 @@ const Parser = struct {
                     try self.appendCommand(.{ .group = cmds });
                 },
                 .keyword_fn => try self.parseFn(),
-                .ampersand_ampersand => {
-                    self.index += 1;
-                    try self.appendCommand(.if_zero);
-                },
-                .pipe_pipe => {
-                    self.index += 1;
-                    try self.appendCommand(.if_nonzero);
-                },
-                .pipe => {
+                .pipe,
+                .ampersand_ampersand,
+                .pipe_pipe,
+                => {
                     if (self.commands.items.len == 0) return error.SyntaxError;
                     self.index += 1;
-                    const lhs = try self.allocator.create(Command);
-                    lhs.* = self.commands.pop();
-                    self.pipe = lhs;
+                    self.binary = switch (token.tag) {
+                        .pipe => .pipe,
+                        .ampersand_ampersand => .if_zero,
+                        .pipe_pipe => .if_nonzero,
+                        else => unreachable,
+                    };
                 },
                 else => {
                     log.debug("unhandled first token: {}", .{token.tag});
@@ -181,12 +185,20 @@ const Parser = struct {
     }
 
     fn appendCommand(self: *Parser, cmd: Command) Error!void {
-        if (self.pipe) |lhs| {
+        if (self.binary) |binary| {
+            const lhs = try self.allocator.create(Command);
             const rhs = try self.allocator.create(Command);
+
+            lhs.* = self.commands.pop();
             rhs.* = cmd;
-            const pipe: Command = .{ .pipe = .{ .lhs = lhs, .rhs = rhs } };
-            try self.commands.append(pipe);
-            self.pipe = null;
+            const bin: Binary = .{ .lhs = lhs, .rhs = rhs };
+            const bin_cmd: Command = switch (binary) {
+                .pipe => .{ .pipe = bin },
+                .if_zero => .{ .if_zero = bin },
+                .if_nonzero => .{ .if_nonzero = bin },
+            };
+            try self.commands.append(bin_cmd);
+            self.binary = null;
             return;
         }
         try self.commands.append(cmd);
@@ -959,28 +971,27 @@ test "&&" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const cmdline = "ls && echo foo";
-    const cmd1: Command = .{ .simple = .{
-        .arguments = &.{
-            .{ .word = "ls" },
-        },
-        .redirections = &.{},
-        .assignments = &.{},
-    } };
-    const cmd2: Command = .if_zero;
-    const cmd3: Command = .{ .simple = .{
-        .arguments = &.{
-            .{ .word = "echo" },
-            .{ .word = "foo" },
-        },
-        .redirections = &.{},
-        .assignments = &.{},
+    const cmd: Command = .{ .if_zero = .{
+        .lhs = &.{ .simple = .{
+            .arguments = &.{
+                .{ .word = "ls" },
+            },
+            .redirections = &.{},
+            .assignments = &.{},
+        } },
+        .rhs = &.{ .simple = .{
+            .arguments = &.{
+                .{ .word = "echo" },
+                .{ .word = "foo" },
+            },
+            .redirections = &.{},
+            .assignments = &.{},
+        } },
     } };
 
     const cmds = try parse(cmdline, allocator);
-    try testing.expectEqual(3, cmds.len);
-    try testing.expectEqualDeep(cmd1, cmds[0]);
-    try testing.expectEqualDeep(cmd2, cmds[1]);
-    try testing.expectEqualDeep(cmd3, cmds[2]);
+    try testing.expectEqual(1, cmds.len);
+    try testing.expectEqualDeep(cmd, cmds[0]);
 }
 
 test "||" {
@@ -988,28 +999,27 @@ test "||" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const cmdline = "ls || echo foo";
-    const cmd1: Command = .{ .simple = .{
-        .arguments = &.{
-            .{ .word = "ls" },
-        },
-        .redirections = &.{},
-        .assignments = &.{},
-    } };
-    const cmd2: Command = .if_nonzero;
-    const cmd3: Command = .{ .simple = .{
-        .arguments = &.{
-            .{ .word = "echo" },
-            .{ .word = "foo" },
-        },
-        .redirections = &.{},
-        .assignments = &.{},
+    const cmd: Command = .{ .if_nonzero = .{
+        .lhs = &.{ .simple = .{
+            .arguments = &.{
+                .{ .word = "ls" },
+            },
+            .redirections = &.{},
+            .assignments = &.{},
+        } },
+        .rhs = &.{ .simple = .{
+            .arguments = &.{
+                .{ .word = "echo" },
+                .{ .word = "foo" },
+            },
+            .redirections = &.{},
+            .assignments = &.{},
+        } },
     } };
 
     const cmds = try parse(cmdline, allocator);
-    try testing.expectEqual(3, cmds.len);
-    try testing.expectEqualDeep(cmd1, cmds[0]);
-    try testing.expectEqualDeep(cmd2, cmds[1]);
-    try testing.expectEqualDeep(cmd3, cmds[2]);
+    try testing.expectEqual(1, cmds.len);
+    try testing.expectEqualDeep(cmd, cmds[0]);
 }
 
 test "pipe" {
@@ -1033,7 +1043,7 @@ test "pipe" {
         .assignments = &.{},
     } };
 
-    const pipe: Pipe = .{ .lhs = &cmd1, .rhs = &cmd2 };
+    const pipe: Binary = .{ .lhs = &cmd1, .rhs = &cmd2 };
     const cmd: Command = .{ .pipe = pipe };
     const cmds = try parse(cmdline, allocator);
     try testing.expectEqual(1, cmds.len);
