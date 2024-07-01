@@ -19,11 +19,18 @@ pub const Command = union(enum) {
     if_zero: Binary, // &&
     if_nonzero: Binary, // ||
     pipe: Binary,
+    if_statement: IfStatement, // if ( list ) cmd else cmd
 };
 
 pub const Binary = struct {
     lhs: *const Command,
     rhs: *const Command,
+};
+
+pub const IfStatement = struct {
+    condition: []const Command,
+    body: []const Command,
+    alt: ?[]const Command,
 };
 
 pub const Argument = union(enum) {
@@ -175,6 +182,7 @@ const Parser = struct {
                         else => unreachable,
                     };
                 },
+                .keyword_if => try self.parseIfStatement(),
                 else => {
                     log.debug("unhandled first token: {}", .{token.tag});
                     self.index += 1;
@@ -319,6 +327,53 @@ const Parser = struct {
             .src = self.src,
         };
         return parser.parseTokens();
+    }
+
+    // if '(' condition ')' '{' body '}' else '{' alt '}'
+    fn parseIfStatement(self: *Parser) Error!void {
+        _ = try self.want(.keyword_if);
+        self.eat(.wsp);
+        _ = try self.want(.l_paren);
+
+        // Parse until the closing r_parent
+        const start = self.index;
+        var paren_cnt: usize = 1;
+        const end = while (self.nextToken()) |tok| {
+            switch (tok.tag) {
+                .l_paren => paren_cnt += 1,
+                .r_paren => {
+                    paren_cnt -|= 1;
+                    if (paren_cnt == 0) break self.index -| 1;
+                },
+                else => {},
+            }
+        } else return error.SyntaxError;
+
+        var parser: Parser = .{
+            .allocator = self.allocator,
+            .tokens = self.tokens[start..end],
+            .commands = try std.ArrayList(Command).initCapacity(self.allocator, 1),
+            .src = self.src,
+        };
+        const condition = try parser.parseTokens();
+        self.eat(.wsp);
+        _ = try self.want(.l_brace);
+        const body = try self.parseGroup();
+        self.eat(.wsp);
+
+        const alt: ?[]const Command = if (self.maybeAny(&.{.keyword_else})) |_| blk: {
+            self.eat(.wsp);
+            _ = try self.want(.l_brace);
+            const alt = try self.parseGroup();
+            break :blk alt;
+        } else null;
+
+        const statement: IfStatement = .{
+            .condition = condition,
+            .body = body,
+            .alt = alt,
+        };
+        try self.appendCommand(.{ .if_statement = statement });
     }
 
     fn parseAssignments(self: *Parser) Error![]Assignment {
@@ -517,6 +572,15 @@ const Parser = struct {
                 self.index += 1
             else
                 return;
+        }
+    }
+
+    fn eatAll(self: *Parser, tags: []const Token.Tag) void {
+        while (self.peekToken()) |tok| {
+            for (tags) |tag| {
+                if (tok.tag == tag)
+                    self.index += 1;
+            } else return;
         }
     }
 
@@ -1045,6 +1109,47 @@ test "pipe" {
 
     const pipe: Binary = .{ .lhs = &cmd1, .rhs = &cmd2 };
     const cmd: Command = .{ .pipe = pipe };
+    const cmds = try parse(cmdline, allocator);
+    try testing.expectEqual(1, cmds.len);
+    try testing.expectEqualDeep(cmd, cmds[0]);
+}
+
+test "if statement" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const cmdline = "if (foo) { bar } else { baz }";
+
+    const condition: Command = .{ .simple = .{
+        .arguments = &.{
+            .{ .word = "foo" },
+        },
+        .redirections = &.{},
+        .assignments = &.{},
+    } };
+    const body: Command = .{ .simple = .{
+        .arguments = &.{
+            .{ .word = "bar" },
+        },
+        .redirections = &.{},
+        .assignments = &.{},
+    } };
+    const alt: Command = .{ .simple = .{
+        .arguments = &.{
+            .{ .word = "baz" },
+        },
+        .redirections = &.{},
+        .assignments = &.{},
+    } };
+
+    const cmd: Command = .{
+        .if_statement = .{
+            .condition = &.{condition},
+            .body = &.{body},
+            .alt = &.{alt},
+        },
+    };
+
     const cmds = try parse(cmdline, allocator);
     try testing.expectEqual(1, cmds.len);
     try testing.expectEqualDeep(cmd, cmds[0]);

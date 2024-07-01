@@ -99,8 +99,7 @@ pub fn run(self: *Rz) !u8 {
             const src = try file.readToEndAlloc(self.allocator, 1_000_000);
             defer self.allocator.free(src);
             const fd = try std.posix.dup(self.tty.fd);
-            const exit = try interpreter.exec(self.allocator, src, &self.env);
-            if (exit) |code| return code;
+            try interpreter.exec(self.allocator, src, &self.env);
             try std.posix.dup2(fd, std.posix.STDOUT_FILENO);
             self.tty.fd = fd;
             try makeRaw(self.tty);
@@ -144,8 +143,20 @@ pub fn run(self: *Rz) !u8 {
                         resetTty(self.tty);
                     }
 
+                    // Check interactive exit
+                    {
+                        var iter = std.mem.splitScalar(u8, zedit.buf.items, ' ');
+                        const maybe_exit = iter.first();
+                        if (std.mem.eql(u8, maybe_exit, "exit")) {
+                            if (iter.next()) |val|
+                                return std.fmt.parseUnsigned(u8, val, 10) catch return 1
+                            else
+                                return 0;
+                        }
+                    }
+
                     // Only returns an error for OutOfMemory
-                    const exit = try interpreter.exec(self.allocator, zedit.buf.items, &self.env);
+                    try interpreter.exec(self.allocator, zedit.buf.items, &self.env);
 
                     {
                         if (self.vx.caps.kitty_keyboard) {
@@ -157,10 +168,6 @@ pub fn run(self: *Rz) !u8 {
                         try makeRaw(self.tty);
                         try loop.start();
                     }
-                    // we check exit condition after restarting loop so we can properly clean up
-                    // vaxis
-                    if (exit) |code| return code;
-
                     {
                         try self.updatePrompt(&zedit);
                         const win = self.vx.window();

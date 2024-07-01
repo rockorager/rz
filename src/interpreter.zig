@@ -21,7 +21,7 @@ const Builtin = enum {
 
 /// executes `src` as an rz script. env will be updated as necessary. If a u8 is returned, the shell
 /// must exit with that as it's exit code
-pub fn exec(allocator: std.mem.Allocator, src: []const u8, env: *std.process.EnvMap) Allocator.Error!?u8 {
+pub fn exec(allocator: std.mem.Allocator, src: []const u8, env: *std.process.EnvMap) Allocator.Error!void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -30,7 +30,7 @@ pub fn exec(allocator: std.mem.Allocator, src: []const u8, env: *std.process.Env
             error.OutOfMemory => return error.OutOfMemory,
             error.SyntaxError => log.err("syntax error", .{}),
         }
-        return null;
+        return;
     };
 
     var interp: Interpreter = .{
@@ -41,10 +41,10 @@ pub fn exec(allocator: std.mem.Allocator, src: []const u8, env: *std.process.Env
     const fds = saveFds();
     defer restoreFds(fds);
 
-    return interp.exec(cmds) catch |err| {
+    _ = interp.exec(cmds) catch |err| {
         switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return null,
+            else => return,
         }
     };
 }
@@ -93,23 +93,22 @@ fn restoreFds(fds: [3]posix.fd_t) void {
 const Interpreter = struct {
     arena: std.mem.Allocator,
     env: *std.process.EnvMap,
-    exit: ?u8 = null,
     /// The saved value of $*. We save it here and restore as needed
     arg_env: ?[]const u8 = null,
     /// In prompt mode, we prevent anything from setting the $status var
     prompt_mode: bool = false,
 
-    fn exec(self: *Interpreter, cmds: []const ast.Command) Error!?u8 {
+    fn exec(self: *Interpreter, cmds: []const ast.Command) Error!u8 {
+        var code: u8 = 0;
         for (cmds) |cmd| {
-            const code = try self.execCommand(cmd);
-            if (self.exit) |exit| return exit;
+            code = try self.execCommand(cmd);
             if (self.prompt_mode) continue;
             switch (cmd) {
                 .assignment => continue,
                 else => try self.setStatus(code),
             }
         }
-        return null;
+        return code;
     }
 
     fn execCommand(self: *Interpreter, cmd: ast.Command) Error!u8 {
@@ -120,16 +119,24 @@ const Interpreter = struct {
                 try self.env.put(key, func.body);
             },
             .assignment => |assignment| try self.execAssignment(assignment),
-            .group => |grp| {
-                const code = try self.exec(grp) orelse 0;
-                return code;
-            },
+            .group => |grp| return self.exec(grp),
             .if_nonzero,
             .if_zero,
             => |bin| return self.execBinary(bin, std.meta.activeTag(cmd)),
             .pipe => |pipe| return self.execPipe(pipe),
+            .if_statement => |stmt| return self.execIfStatement(stmt),
         }
         return 0;
+    }
+
+    fn execIfStatement(self: *Interpreter, cmd: ast.IfStatement) Error!u8 {
+        const result = try self.exec(cmd.condition);
+        if (result == 0)
+            return self.exec(cmd.body)
+        else if (cmd.alt) |alt|
+            return self.exec(alt)
+        else
+            return result;
     }
 
     fn execAssignment(self: *Interpreter, cmd: ast.Assignment) Error!void {
@@ -222,8 +229,7 @@ const Interpreter = struct {
             }
             return 1;
         };
-        const exit = try self.exec(cmds) orelse 0;
-        return exit;
+        return self.exec(cmds);
     }
 
     fn execBuiltin(self: *Interpreter, args: []const []const u8) Error!u8 {
@@ -272,11 +278,10 @@ const Interpreter = struct {
                 return 0;
             },
             .exit => {
-                self.exit = if (args.len > 1)
-                    std.fmt.parseUnsigned(u8, args[1], 10) catch return error.SyntaxError
-                else
-                    0;
-                return self.exit.?;
+                if (args.len > 1) {
+                    const code = std.fmt.parseUnsigned(u8, args[1], 10) catch 1;
+                    std.process.exit(code);
+                } else std.process.exit(0);
             },
         }
     }
