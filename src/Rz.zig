@@ -132,38 +132,42 @@ pub fn run(self: *Rz) !u8 {
         const event = loop.nextEvent();
         switch (event) {
             .key_press => |key| blk: {
-                if (key.matches('c', .{ .ctrl = true })) {
-                    break;
-                } else if (key.matches(vaxis.Key.enter, .{})) {
+                if (key.matches(vaxis.Key.enter, .{})) {
                     _ = arena.reset(.retain_capacity);
                     loop.stop();
 
-                    if (self.vx.caps.kitty_keyboard)
-                        try any.writeAll(vaxis.ctlseqs.csi_u_pop);
-                    try any.writeAll("\r\n");
-                    try writer.flush();
+                    {
+                        if (self.vx.caps.kitty_keyboard)
+                            try any.writeAll(vaxis.ctlseqs.csi_u_pop);
+                        try any.writeAll("\r\n");
+                        try writer.flush();
+                        resetTty(self.tty);
+                    }
 
-                    resetTty(self.tty);
                     // Only returns an error for OutOfMemory
                     const exit = try interpreter.exec(self.allocator, zedit.buf.items, &self.env);
 
-                    if (self.vx.caps.kitty_keyboard) {
-                        const flags: vaxis.Key.KittyFlags = .{ .report_events = true };
-                        const flag_int: u5 = @bitCast(flags);
-                        try any.print(vaxis.ctlseqs.csi_u_push, .{flag_int});
+                    {
+                        if (self.vx.caps.kitty_keyboard) {
+                            const flags: vaxis.Key.KittyFlags = .{ .report_events = true };
+                            const flag_int: u5 = @bitCast(flags);
+                            try any.print(vaxis.ctlseqs.csi_u_push, .{flag_int});
+                        }
+                        zedit.clearRetainingCapacity();
+                        try makeRaw(self.tty);
+                        try loop.start();
                     }
-                    zedit.clearRetainingCapacity();
-                    try makeRaw(self.tty);
-                    try loop.start();
                     // we check exit condition after restarting loop so we can properly clean up
                     // vaxis
                     if (exit) |code| return code;
 
-                    try self.updatePrompt(&zedit);
-                    const win = self.vx.window();
-                    win.clear();
-                    try self.vx.render(any);
-                    try writer.flush();
+                    {
+                        try self.updatePrompt(&zedit);
+                        const win = self.vx.window();
+                        win.clear();
+                        try self.vx.render(any);
+                        try writer.flush();
+                    }
                 } else {
                     try zedit.update(.{ .key_press = key });
                     const cmds = ast.parse(zedit.buf.items, allocator) catch break :blk;
