@@ -104,7 +104,10 @@ const Interpreter = struct {
             const code = try self.execCommand(cmd);
             if (self.exit) |exit| return exit;
             if (self.prompt_mode) continue;
-            try self.setStatus(code);
+            switch (cmd) {
+                .assignment => continue,
+                else => try self.setStatus(code),
+            }
         }
         return null;
     }
