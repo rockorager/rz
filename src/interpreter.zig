@@ -3,6 +3,7 @@ const posix = std.posix;
 const testing = std.testing;
 const ast = @import("ast.zig");
 const Allocator = std.mem.Allocator;
+const ctlseqs = @import("vaxis").ctlseqs;
 
 const main = @import("main.zig");
 
@@ -16,12 +17,13 @@ pub const Error = error{
 
 const Builtin = enum {
     cd,
+    clear,
     exit,
 };
 
 /// executes `src` as an rz script. env will be updated as necessary. If a u8 is returned, the shell
 /// must exit with that as it's exit code
-pub fn exec(allocator: std.mem.Allocator, src: []const u8, env: *std.process.EnvMap) Allocator.Error!void {
+pub fn exec(allocator: std.mem.Allocator, src: []const u8, env: *std.process.EnvMap) Allocator.Error!u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -30,7 +32,7 @@ pub fn exec(allocator: std.mem.Allocator, src: []const u8, env: *std.process.Env
             error.OutOfMemory => return error.OutOfMemory,
             error.SyntaxError => log.err("syntax error", .{}),
         }
-        return;
+        return 255;
     };
 
     var interp: Interpreter = .{
@@ -41,10 +43,10 @@ pub fn exec(allocator: std.mem.Allocator, src: []const u8, env: *std.process.Env
     const fds = saveFds();
     defer restoreFds(fds);
 
-    _ = interp.exec(cmds) catch |err| {
+    return interp.exec(cmds) catch |err| {
         switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return,
+            else => return 255,
         }
     };
 }
@@ -275,6 +277,17 @@ const Interpreter = struct {
 
                 const path = try std.fs.path.join(self.arena, components.items);
                 try std.process.changeCurDir(path);
+                return 0;
+            },
+            .clear => {
+                const writer = std.io.getStdOut().writer();
+                // We don't reset sync since we want it to hold until our render loop is done
+                writer.writeAll(ctlseqs.sync_set ++
+                    ctlseqs.home ++
+                    ctlseqs.erase_below_cursor) catch |err| {
+                    log.err("clear: couldn't write to stdout: {}", .{err});
+                    return error.BuiltinCommandError;
+                };
                 return 0;
             },
             .exit => {

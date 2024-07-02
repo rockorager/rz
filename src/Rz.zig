@@ -6,6 +6,7 @@ const vaxis = @import("vaxis");
 const ast = @import("ast.zig");
 const interpreter = @import("interpreter.zig");
 const prompt = @import("prompt.zig");
+const History = @import("History.zig");
 
 const Line = @import("Line.zig");
 
@@ -24,6 +25,7 @@ tty: vaxis.Tty,
 env: std.process.EnvMap,
 /// A reference to the prompt string
 prompt_str: ?[]const u8 = null,
+history: History,
 
 pub fn init(allocator: std.mem.Allocator) !Rz {
     var env = try std.process.getEnvMap(allocator);
@@ -53,6 +55,11 @@ pub fn init(allocator: std.mem.Allocator) !Rz {
         .vx = try vaxis.init(allocator, .{ .kitty_keyboard_flags = .{ .report_events = true } }),
         .tty = try vaxis.Tty.init(),
         .env = env,
+        .history = .{
+            .allocator = allocator,
+            .file = "/home/tim/.local/share/rz/history",
+            .entries = std.ArrayList(History.Entry).init(allocator),
+        },
     };
 }
 
@@ -63,6 +70,7 @@ pub fn deinit(self: *Rz) void {
     if (self.prompt_str) |str| {
         self.allocator.free(str);
     }
+    self.history.deinit();
 }
 
 pub fn run(self: *Rz) !u8 {
@@ -99,7 +107,7 @@ pub fn run(self: *Rz) !u8 {
             const src = try file.readToEndAlloc(self.allocator, 1_000_000);
             defer self.allocator.free(src);
             const fd = try std.posix.dup(self.tty.fd);
-            try interpreter.exec(self.allocator, src, &self.env);
+            _ = try interpreter.exec(self.allocator, src, &self.env);
             try std.posix.dup2(fd, std.posix.STDOUT_FILENO);
             self.tty.fd = fd;
             try makeRaw(self.tty);
@@ -127,18 +135,29 @@ pub fn run(self: *Rz) !u8 {
 
     try self.updatePrompt(&zedit);
 
+    try self.history.init();
+
     while (true) {
         const event = loop.nextEvent();
         switch (event) {
             .key_press => |key| blk: {
                 if (key.matches(vaxis.Key.enter, .{})) {
+                    if (zedit.buf.items.len == 0) {
+                        try any.writeAll(vaxis.ctlseqs.sync_set ++ "\r\n");
+                        try self.clearInternalScreen();
+                        break :blk;
+                    }
                     _ = arena.reset(.retain_capacity);
                     loop.stop();
 
                     {
                         if (self.vx.caps.kitty_keyboard)
                             try any.writeAll(vaxis.ctlseqs.csi_u_pop);
+                        const n = zedit.last_drawn_row -| zedit.prev_cursor_row;
                         try any.writeAll("\r\n");
+                        for (0..n) |_| {
+                            try any.writeAll("\r\n");
+                        }
                         try writer.flush();
                         resetTty(self.tty);
                     }
@@ -156,9 +175,17 @@ pub fn run(self: *Rz) !u8 {
                     }
 
                     // Only returns an error for OutOfMemory
-                    try interpreter.exec(self.allocator, zedit.buf.items, &self.env);
+                    const exit = try interpreter.exec(self.allocator, zedit.buf.items, &self.env);
+                    try any.writeAll(vaxis.ctlseqs.hide_cursor);
+                    try writer.flush();
+                    const pwd = try std.process.getCwdAlloc(self.allocator);
+                    defer self.allocator.free(pwd);
+                    try self.history.append(zedit.buf.items, pwd, exit);
 
                     {
+                        for (0..zedit.last_drawn_row) |_| {
+                            try any.writeAll("\r\n");
+                        }
                         if (self.vx.caps.kitty_keyboard) {
                             const flags: vaxis.Key.KittyFlags = .{ .report_events = true };
                             const flag_int: u5 = @bitCast(flags);
@@ -167,18 +194,42 @@ pub fn run(self: *Rz) !u8 {
                         zedit.clearRetainingCapacity();
                         try makeRaw(self.tty);
                         try loop.start();
-                    }
-                    {
-                        try self.updatePrompt(&zedit);
-                        const win = self.vx.window();
-                        win.clear();
-                        try self.vx.render(any);
                         try writer.flush();
                     }
+                    {
+                        // Internally clear our model. We write to a null_writer because we don't
+                        // actually have to write these bits
+                        try self.updatePrompt(&zedit);
+                        try self.clearInternalScreen();
+                    }
+                    {
+                        try any.writeAll(vaxis.ctlseqs.sync_set);
+                        try any.writeAll(vaxis.ctlseqs.erase_below_cursor);
+                        try writer.flush();
+                    }
+                } else if (key.matches('r', .{ .ctrl = true })) {
+                    // TODO: history search
+                } else if (key.matches('l', .{ .ctrl = true })) {
+                    try any.writeAll(vaxis.ctlseqs.sync_set);
+                    try any.writeAll(vaxis.ctlseqs.hide_cursor);
+                    try any.writeAll(vaxis.ctlseqs.home);
+                    try any.writeAll(vaxis.ctlseqs.erase_below_cursor);
+                    try writer.flush();
+                    try self.clearInternalScreen();
                 } else {
                     try zedit.update(.{ .key_press = key });
-                    const cmds = ast.parse(zedit.buf.items, allocator) catch break :blk;
-                    _ = cmds;
+                    switch (zedit.buf.items.len) {
+                        0 => zedit.hint = "",
+                        else => {
+                            const hint = self.history.findPrefix(zedit.buf.items);
+                            zedit.hint = hint;
+                        },
+                    }
+                    {
+                        // TODO: syntax highlight
+                        const cmds = ast.parse(zedit.buf.items, allocator) catch break :blk;
+                        _ = cmds;
+                    }
                 }
             },
 
@@ -254,4 +305,12 @@ fn updatePrompt(self: *Rz, edit: *Line) !void {
     if (top_left) |_| {}
     if (top_right) |_| {}
     if (right) |_| {}
+}
+
+/// Writes a clear screen to a null writer, which has the effect of clearing out the internal screen
+fn clearInternalScreen(self: *Rz) !void {
+    const win = self.vx.window();
+    win.clear();
+    win.hideCursor();
+    try self.vx.render(std.io.null_writer.any());
 }

@@ -39,13 +39,23 @@ prompt: struct {
     top_right: std.ArrayList(vaxis.Segment),
 },
 
+/// Shown in dimmed color after the end of the line
+hint: []const u8,
+
+last_drawn_row: usize = 0,
+
 pub fn init(alloc: std.mem.Allocator, unicode: *const Unicode) Line {
-    return .{ .buf = std.ArrayList(u8).init(alloc), .unicode = unicode, .prompt = .{
-        .left = std.ArrayList(vaxis.Segment).init(alloc),
-        .right = std.ArrayList(vaxis.Segment).init(alloc),
-        .top_left = std.ArrayList(vaxis.Segment).init(alloc),
-        .top_right = std.ArrayList(vaxis.Segment).init(alloc),
-    } };
+    return .{
+        .buf = std.ArrayList(u8).init(alloc),
+        .unicode = unicode,
+        .prompt = .{
+            .left = std.ArrayList(vaxis.Segment).init(alloc),
+            .right = std.ArrayList(vaxis.Segment).init(alloc),
+            .top_left = std.ArrayList(vaxis.Segment).init(alloc),
+            .top_right = std.ArrayList(vaxis.Segment).init(alloc),
+        },
+        .hint = "",
+    };
 }
 
 pub fn deinit(self: *Line) void {
@@ -68,6 +78,11 @@ pub fn update(self: *Line, event: Event) !void {
             } else if (key.matches(Key.left, .{}) or key.matches('b', .{ .ctrl = true })) {
                 if (self.cursor_idx > 0) self.cursor_idx -= 1;
             } else if (key.matches(Key.right, .{}) or key.matches('f', .{ .ctrl = true })) {
+                if (self.cursor_idx == self.grapheme_count) {
+                    // accept hint
+                    try self.insertSliceAtCursor(self.hint);
+                    self.hint = "";
+                }
                 if (self.cursor_idx < self.grapheme_count) self.cursor_idx += 1;
             } else if (key.matches('a', .{ .ctrl = true })) {
                 self.cursor_idx = 0;
@@ -176,7 +191,34 @@ pub fn draw(self: *Line, win: Window) void {
             self.prev_cursor_row = row;
         }
     }
+
+    var hint_iter = self.unicode.graphemeIterator(self.hint);
+    i = 0;
+    while (hint_iter.next()) |grapheme| {
+        const g = grapheme.bytes(self.hint);
+        const w = win.gwidth(g);
+        if (col + w > win.width) {
+            row += 1;
+            col = 0;
+        }
+        win.writeCell(col, row, .{
+            .char = .{
+                .grapheme = g,
+                .width = w,
+            },
+            .style = .{
+                .fg = .{ .index = 8 },
+            },
+        });
+        col += w;
+        i += 1;
+        if (col >= win.width) {
+            row += 1;
+            col = 0;
+        }
+    }
     win.showCursor(self.prev_cursor_col, self.prev_cursor_row);
+    self.last_drawn_row = row;
 }
 
 pub fn clearAndFree(self: *Line) void {
