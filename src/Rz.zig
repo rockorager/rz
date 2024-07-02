@@ -142,6 +142,7 @@ pub fn run(self: *Rz) !u8 {
         switch (event) {
             .key_press => |key| blk: {
                 if (key.matches(vaxis.Key.enter, .{})) {
+                    zedit.hint = "";
                     if (zedit.buf.items.len == 0) {
                         try any.writeAll(vaxis.ctlseqs.sync_set ++ "\r\n");
                         try self.clearInternalScreen();
