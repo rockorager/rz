@@ -48,6 +48,12 @@ pub fn init(allocator: std.mem.Allocator) !Rz {
         try env.putMove(key2, path2);
     }
 
+    {
+        var buf: [std.posix.PATH_MAX]u8 = undefined;
+        const pwd = try std.process.getCwd(&buf);
+        try env.put("PWD", pwd);
+    }
+
     // TODO: pid
 
     return .{
@@ -76,6 +82,11 @@ pub fn deinit(self: *Rz) void {
 pub fn run(self: *Rz) !u8 {
     var writer = self.tty.bufferedWriter();
     const any = writer.writer().any();
+
+    if (self.env.get("PWD")) |pwd|
+        try self.emitOSC7(pwd)
+    else
+        try self.updatePwd();
 
     // Load config files
     {
@@ -195,9 +206,10 @@ pub fn run(self: *Rz) !u8 {
                             try writer.flush();
                         }
                         {
+                            try self.updatePwd();
+                            try self.updatePrompt(&zedit);
                             // Internally clear our model. We write to a null_writer because we don't
                             // actually have to write these bits
-                            try self.updatePrompt(&zedit);
                             try self.clearInternalScreen();
                         }
                         {
@@ -333,4 +345,56 @@ fn clearInternalScreen(self: *Rz) !void {
     win.clear();
     win.hideCursor();
     try self.vx.render(std.io.null_writer.any());
+}
+
+// Updates PWD env if needed, and issues OSC 7 sequences on change
+fn updatePwd(self: *Rz) !void {
+    const old_pwd = self.env.get("PWD") orelse "";
+    var buf: [std.posix.PATH_MAX]u8 = undefined;
+    const pwd = try std.process.getCwd(&buf);
+
+    if (std.mem.eql(u8, old_pwd, pwd))
+        return;
+
+    try self.env.put("PWD", pwd);
+    try self.emitOSC7(pwd);
+}
+
+fn emitOSC7(self: *Rz, pwd: []const u8) !void {
+    var buffered = self.tty.bufferedWriter();
+    const writer = buffered.writer();
+
+    var hostname_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
+    const hostname = try std.posix.gethostname(&hostname_buf);
+    try writer.print("\x1b]7;file://{s}", .{hostname});
+
+    for (pwd) |b| {
+        switch (b) {
+            ' ',
+            '!',
+            '"',
+            '#',
+            '$',
+            '%',
+            '&',
+            '\'',
+            '(',
+            ')',
+            '*',
+            '+',
+            ',',
+            // '/', We don't url encode '/' even though it is reserved
+            ':',
+            ';',
+            '=',
+            '?',
+            '@',
+            '[',
+            ']',
+            => try writer.print("{x}", .{b}),
+            else => try writer.writeByte(b),
+        }
+    }
+    try writer.writeAll("\x1b\\");
+    try buffered.flush();
 }
