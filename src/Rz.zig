@@ -26,6 +26,7 @@ env: std.process.EnvMap,
 /// A reference to the prompt string
 prompt_str: ?[]const u8 = null,
 history: History,
+completion: ?Completions = null,
 
 pub fn init(allocator: std.mem.Allocator) !Rz {
     var env = try std.process.getEnvMap(allocator);
@@ -77,6 +78,9 @@ pub fn deinit(self: *Rz) void {
         self.allocator.free(str);
     }
     self.history.deinit();
+    if (self.completion) |*cmp| {
+        cmp.deinit();
+    }
 }
 
 pub fn run(self: *Rz) !u8 {
@@ -159,6 +163,10 @@ pub fn run(self: *Rz) !u8 {
                     {
                         zedit.hint = "";
                         history_index = null;
+                        if (self.completion) |*cmp| {
+                            cmp.deinit();
+                            self.completion = null;
+                        }
                         if (zedit.buf.items.len == 0) {
                             try any.writeAll(vaxis.ctlseqs.sync_set ++ "\r\n");
                             try self.clearInternalScreen();
@@ -246,6 +254,21 @@ pub fn run(self: *Rz) !u8 {
                     const cmd = self.history.nthEntry(history_index.?);
                     zedit.clearRetainingCapacity();
                     try zedit.insertSliceAtCursor(cmd);
+                } else if (key.matches(vaxis.Key.tab, .{})) {
+                    if (self.completion) |*completer| {
+                        completer.selectNext();
+                    } else {
+                        self.completion = Completions.init(self.allocator);
+                        try self.completion.?.complete(zedit.buf.items);
+                    }
+                } else if (key.matches(vaxis.Key.tab, .{ .shift = true })) {
+                    if (self.completion) |*completer|
+                        completer.selectPrev();
+                } else if (key.matches(vaxis.Key.escape, .{})) {
+                    if (self.completion) |*cmp| {
+                        cmp.deinit();
+                        self.completion = null;
+                    }
                 } else {
                     history_index = null;
                     try zedit.update(.{ .key_press = key });
@@ -260,6 +283,12 @@ pub fn run(self: *Rz) !u8 {
                         // TODO: syntax highlight
                         const cmds = ast.parse(zedit.buf.items, allocator) catch break :blk;
                         _ = cmds;
+                    }
+                    if (self.completion) |*cmp| {
+                        if (!cmp.sameLine(zedit.buf.items)) {
+                            cmp.deinit();
+                            self.completion = null;
+                        }
                     }
                 }
             },
@@ -281,6 +310,13 @@ pub fn run(self: *Rz) !u8 {
         win.clear();
         win.hideCursor();
         zedit.draw(win);
+        if (self.completion) |*completer| {
+            const completion_win = win.child(.{
+                .y_off = zedit.last_drawn_row + 1,
+                .height = .{ .limit = 6 },
+            });
+            try completer.draw(completion_win);
+        }
 
         try self.vx.render(any);
         try writer.flush();
@@ -397,3 +433,197 @@ fn emitOSC7(self: *Rz, pwd: []const u8) !void {
     try writer.writeAll("\x1b\\");
     try buffered.flush();
 }
+
+const Completions = struct {
+    allocator: std.mem.Allocator,
+    stdout: std.ArrayList(u8),
+    stderr: std.ArrayList(u8),
+
+    items: std.ArrayList(Item),
+    idx: usize = 0,
+    scroll: usize = 0,
+
+    // a duped copy of the completed line
+    completed_line: ?[]const u8 = null,
+
+    const Item = struct {
+        name: []const u8,
+        secondary_name: []const u8 = "",
+        description: []const u8,
+    };
+
+    fn init(allocator: std.mem.Allocator) Completions {
+        return .{
+            .allocator = allocator,
+            .stdout = std.ArrayList(u8).init(allocator),
+            .stderr = std.ArrayList(u8).init(allocator),
+            .items = std.ArrayList(Completions.Item).init(allocator),
+        };
+    }
+
+    fn deinit(self: *Completions) void {
+        self.stdout.deinit();
+        self.stderr.deinit();
+        self.items.deinit();
+        if (self.completed_line) |line| {
+            self.allocator.free(line);
+            self.completed_line = null;
+        }
+    }
+
+    fn reset(self: *Completions) void {
+        self.items.clearAndFree();
+        self.stdout.clearAndFree();
+        self.stderr.clearAndFree();
+        self.idx = 0;
+        if (self.completed_line) |line| {
+            self.allocator.free(line);
+            self.completed_line = null;
+        }
+    }
+
+    fn selectNext(self: *Completions) void {
+        self.idx += 1;
+        if (self.idx >= self.items.items.len) {
+            self.idx = 0;
+            self.scroll = 0;
+        }
+    }
+
+    fn selectPrev(self: *Completions) void {
+        if (self.idx == 0) {
+            self.idx = self.items.items.len - 1;
+            return;
+        }
+        self.idx -|= 1;
+        if (self.idx < self.scroll)
+            self.scroll = self.idx;
+    }
+
+    fn complete(self: *Completions, line: []const u8) !void {
+        self.reset();
+        try self.execComplete(line);
+    }
+
+    fn sameLine(self: *Completions, line: []const u8) bool {
+        const old = self.completed_line orelse return false;
+        return std.mem.eql(u8, old, line);
+    }
+
+    fn execComplete(self: *Completions, line: []const u8) !void {
+        if (self.completed_line) |l| {
+            self.allocator.free(l);
+        }
+        self.completed_line = try self.allocator.dupe(u8, line);
+        const arg = try std.fmt.allocPrint(
+            self.allocator,
+            "complete -C \"{s}\"",
+            .{line},
+        );
+        defer self.allocator.free(arg);
+        const args = [_][]const u8{
+            "fish",
+            "-c",
+            arg,
+        };
+
+        var cmd = std.process.Child.init(&args, self.allocator);
+        cmd.stdout_behavior = .Pipe;
+        cmd.stderr_behavior = .Pipe;
+
+        try cmd.spawn();
+        try cmd.collectOutput(&self.stdout, &self.stderr, 1_000_000);
+        const result = try cmd.wait();
+        switch (result) {
+            .Exited => |code| {
+                switch (code) {
+                    0 => {},
+                    else => return error.CompletionCommandError,
+                }
+            },
+            else => return error.CompletionCommandError,
+        }
+        log.err("{s}", .{self.stdout.items});
+
+        var line_iter = std.mem.splitScalar(u8, self.stdout.items, '\n');
+        while (line_iter.next()) |l| {
+            if (l.len == 0) continue;
+            var iter = std.mem.splitScalar(u8, l, '\t');
+            const name = iter.first();
+            const description = iter.next() orelse "";
+            if (description.len == 0)
+                try self.items.append(.{
+                    .name = name,
+                    .description = description,
+                });
+            for (self.items.items) |*item| {
+                if (item.name.len > 0 and item.name[0] == '-' and std.mem.eql(u8, item.description, description)) {
+                    item.secondary_name = name;
+                    break;
+                }
+            } else {
+                try self.items.append(.{
+                    .name = name,
+                    .description = description,
+                });
+            }
+        }
+    }
+
+    fn draw(self: *Completions, win: vaxis.Window) !void {
+        const name_width: usize = 24;
+        const name_win = win.child(.{
+            .x_off = 3,
+            .width = .{ .limit = name_width },
+        });
+        const description_win = win.child(.{
+            .x_off = name_width,
+        });
+        const scrollbar_win = win.child(.{
+            .x_off = win.width - 1,
+        });
+
+        if (self.scroll + win.height <= self.idx) {
+            self.scroll = self.idx -| win.height + 1;
+        }
+
+        var i: usize = self.scroll;
+        while (i < self.items.items.len) : (i += 1) {
+            if (i == self.idx) {
+                _ = try win.printSegment(.{
+                    .text = ">",
+                    .style = .{ .fg = .{ .index = 5 } },
+                }, .{
+                    .row_offset = i - self.scroll,
+                    .col_offset = 1,
+                });
+            }
+            const item = self.items.items[i];
+            const name_result = try name_win.printSegment(.{ .text = item.name }, .{
+                .row_offset = i - self.scroll,
+            });
+
+            _ = try name_win.printSegment(.{ .text = item.secondary_name }, .{
+                .row_offset = i - self.scroll,
+                .col_offset = name_result.col + 1,
+            });
+            _ = try description_win.printSegment(
+                .{
+                    .text = item.description,
+                    .style = .{
+                        .fg = .{ .index = 5 },
+                        .italic = true,
+                    },
+                },
+                .{ .row_offset = i - self.scroll },
+            );
+        }
+
+        const scrollbar: vaxis.widgets.Scrollbar = .{
+            .total = self.items.items.len,
+            .top = self.scroll,
+            .view_size = win.height,
+        };
+        scrollbar.draw(scrollbar_win);
+    }
+};
