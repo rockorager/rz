@@ -167,17 +167,16 @@ pub fn run(self: *Rz) !u8 {
                         _ = arena.reset(.retain_capacity);
                         loop.stop();
 
-                        {
-                            if (self.vx.caps.kitty_keyboard)
-                                try any.writeAll(vaxis.ctlseqs.csi_u_pop);
-                            const n = zedit.last_drawn_row -| zedit.prev_cursor_row;
+                        if (self.vx.caps.kitty_keyboard)
+                            try any.writeAll(vaxis.ctlseqs.csi_u_pop);
+                        const n = zedit.last_drawn_row -| zedit.prev_cursor_row;
+                        try any.writeAll("\r\n");
+                        for (0..n) |_| {
                             try any.writeAll("\r\n");
-                            for (0..n) |_| {
-                                try any.writeAll("\r\n");
-                            }
-                            try writer.flush();
-                            resetTty(self.tty);
                         }
+                        try any.writeAll(vaxis.ctlseqs.sgr_reset);
+                        try writer.flush();
+                        resetTty(self.tty);
                     }
 
                     // Only returns an error for OutOfMemory
