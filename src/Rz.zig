@@ -137,12 +137,15 @@ pub fn run(self: *Rz) !u8 {
 
     try self.history.init();
 
+    var history_index: ?usize = null;
+
     while (true) {
         const event = loop.nextEvent();
         switch (event) {
             .key_press => |key| blk: {
                 if (key.matches(vaxis.Key.enter, .{})) {
                     zedit.hint = "";
+                    history_index = null;
                     if (zedit.buf.items.len == 0) {
                         try any.writeAll(vaxis.ctlseqs.sync_set ++ "\r\n");
                         try self.clearInternalScreen();
@@ -161,18 +164,6 @@ pub fn run(self: *Rz) !u8 {
                         }
                         try writer.flush();
                         resetTty(self.tty);
-                    }
-
-                    // Check interactive exit
-                    {
-                        var iter = std.mem.splitScalar(u8, zedit.buf.items, ' ');
-                        const maybe_exit = iter.first();
-                        if (std.mem.eql(u8, maybe_exit, "exit")) {
-                            if (iter.next()) |val|
-                                return std.fmt.parseUnsigned(u8, val, 10) catch return 1
-                            else
-                                return 0;
-                        }
                     }
 
                     // Only returns an error for OutOfMemory
@@ -217,7 +208,28 @@ pub fn run(self: *Rz) !u8 {
                     try any.writeAll(vaxis.ctlseqs.erase_below_cursor);
                     try writer.flush();
                     try self.clearInternalScreen();
+                } else if (key.matches(vaxis.Key.up, .{})) {
+                    if (history_index) |idx| {
+                        history_index = @min(self.history.entries.items.len - 1, idx + 1);
+                    } else {
+                        history_index = 0;
+                    }
+                    const cmd = self.history.nthEntry(history_index.?);
+                    zedit.clearRetainingCapacity();
+                    try zedit.insertSliceAtCursor(cmd);
+                } else if (key.matches(vaxis.Key.down, .{})) {
+                    const idx = history_index orelse break :blk;
+                    if (idx == 0) {
+                        history_index = null;
+                        zedit.clearRetainingCapacity();
+                        break :blk;
+                    }
+                    history_index = idx -| 1;
+                    const cmd = self.history.nthEntry(history_index.?);
+                    zedit.clearRetainingCapacity();
+                    try zedit.insertSliceAtCursor(cmd);
                 } else {
+                    history_index = null;
                     try zedit.update(.{ .key_press = key });
                     switch (zedit.buf.items.len) {
                         0 => zedit.hint = "",

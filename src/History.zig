@@ -41,6 +41,10 @@ pub const Entry = struct {
             .timestamp = timestamp,
         };
     }
+
+    fn lessThan(_: void, lhs: Entry, rhs: Entry) bool {
+        return lhs.timestamp < rhs.timestamp;
+    }
 };
 
 allocator: std.mem.Allocator,
@@ -115,6 +119,12 @@ pub fn append(self: *History, command: []const u8, path: []const u8, exit_code: 
     try entry.encode(file.writer().any());
 }
 
+/// Sorts the entries in descending order by timestamp. This means the latest command is the last in
+/// the list
+fn sortDescending(self: *History) void {
+    std.sort.block(Entry, self.entries.items, {}, Entry.lessThan);
+}
+
 /// Finds an an entry with the exact prefix and returns the most recent command. The returned text
 /// is owned by History, and is trimmed of the prefix
 pub fn findPrefix(self: History, cmdline: []const u8) []const u8 {
@@ -130,6 +140,13 @@ pub fn findPrefix(self: History, cmdline: []const u8) []const u8 {
         return l.command[cmdline.len..]
     else
         return "";
+}
+
+/// Returns the command from the nth position when sorted by most recent
+pub fn nthEntry(self: *History, n: usize) []const u8 {
+    self.sortDescending();
+    const i = (self.entries.items.len -| 1) -| n;
+    return self.entries.items[i].command;
 }
 
 // Algorithm:

@@ -19,6 +19,7 @@ const Builtin = enum {
     cd,
     clear,
     exit,
+    @"return",
 };
 
 /// executes `src` as an rz script. env will be updated as necessary. If a u8 is returned, the shell
@@ -295,6 +296,12 @@ const Interpreter = struct {
                     const code = std.fmt.parseUnsigned(u8, args[1], 10) catch 1;
                     std.process.exit(code);
                 } else std.process.exit(0);
+            },
+            .@"return" => {
+                if (args.len > 1) {
+                    const code = std.fmt.parseUnsigned(u8, args[1], 10) catch 1;
+                    return code;
+                } else return 0;
             },
         }
     }
