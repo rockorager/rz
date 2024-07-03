@@ -144,60 +144,67 @@ pub fn run(self: *Rz) !u8 {
         switch (event) {
             .key_press => |key| blk: {
                 if (key.matches(vaxis.Key.enter, .{})) {
-                    zedit.hint = "";
-                    history_index = null;
-                    if (zedit.buf.items.len == 0) {
-                        try any.writeAll(vaxis.ctlseqs.sync_set ++ "\r\n");
-                        try self.clearInternalScreen();
-                        break :blk;
-                    }
-                    _ = arena.reset(.retain_capacity);
-                    loop.stop();
-
+                    // pre-exec. TODO: move this into a function
                     {
-                        if (self.vx.caps.kitty_keyboard)
-                            try any.writeAll(vaxis.ctlseqs.csi_u_pop);
-                        const n = zedit.last_drawn_row -| zedit.prev_cursor_row;
-                        try any.writeAll("\r\n");
-                        for (0..n) |_| {
-                            try any.writeAll("\r\n");
+                        zedit.hint = "";
+                        history_index = null;
+                        if (zedit.buf.items.len == 0) {
+                            try any.writeAll(vaxis.ctlseqs.sync_set ++ "\r\n");
+                            try self.clearInternalScreen();
+                            break :blk;
                         }
-                        try writer.flush();
-                        resetTty(self.tty);
+                        _ = arena.reset(.retain_capacity);
+                        loop.stop();
+
+                        {
+                            if (self.vx.caps.kitty_keyboard)
+                                try any.writeAll(vaxis.ctlseqs.csi_u_pop);
+                            const n = zedit.last_drawn_row -| zedit.prev_cursor_row;
+                            try any.writeAll("\r\n");
+                            for (0..n) |_| {
+                                try any.writeAll("\r\n");
+                            }
+                            try writer.flush();
+                            resetTty(self.tty);
+                        }
                     }
 
                     // Only returns an error for OutOfMemory
                     const exit = try interpreter.exec(self.allocator, zedit.buf.items, &self.env);
-                    try any.writeAll(vaxis.ctlseqs.hide_cursor);
-                    try writer.flush();
-                    const pwd = try std.process.getCwdAlloc(self.allocator);
-                    defer self.allocator.free(pwd);
-                    try self.history.append(zedit.buf.items, pwd, exit);
 
+                    // post-exec. TODO: move this into a function
                     {
-                        for (0..zedit.last_drawn_row) |_| {
-                            try any.writeAll("\r\n");
-                        }
-                        if (self.vx.caps.kitty_keyboard) {
-                            const flags: vaxis.Key.KittyFlags = .{ .report_events = true };
-                            const flag_int: u5 = @bitCast(flags);
-                            try any.print(vaxis.ctlseqs.csi_u_push, .{flag_int});
-                        }
-                        zedit.clearRetainingCapacity();
-                        try makeRaw(self.tty);
-                        try loop.start();
+                        try any.writeAll(vaxis.ctlseqs.hide_cursor);
                         try writer.flush();
-                    }
-                    {
-                        // Internally clear our model. We write to a null_writer because we don't
-                        // actually have to write these bits
-                        try self.updatePrompt(&zedit);
-                        try self.clearInternalScreen();
-                    }
-                    {
-                        try any.writeAll(vaxis.ctlseqs.sync_set);
-                        try any.writeAll(vaxis.ctlseqs.erase_below_cursor);
-                        try writer.flush();
+                        const pwd = try std.process.getCwdAlloc(self.allocator);
+                        defer self.allocator.free(pwd);
+                        try self.history.append(zedit.buf.items, pwd, exit);
+
+                        {
+                            for (0..zedit.last_drawn_row) |_| {
+                                try any.writeAll("\r\n");
+                            }
+                            if (self.vx.caps.kitty_keyboard) {
+                                const flags: vaxis.Key.KittyFlags = .{ .report_events = true };
+                                const flag_int: u5 = @bitCast(flags);
+                                try any.print(vaxis.ctlseqs.csi_u_push, .{flag_int});
+                            }
+                            zedit.clearRetainingCapacity();
+                            try makeRaw(self.tty);
+                            try loop.start();
+                            try writer.flush();
+                        }
+                        {
+                            // Internally clear our model. We write to a null_writer because we don't
+                            // actually have to write these bits
+                            try self.updatePrompt(&zedit);
+                            try self.clearInternalScreen();
+                        }
+                        {
+                            try any.writeAll(vaxis.ctlseqs.sync_set);
+                            try any.writeAll(vaxis.ctlseqs.erase_below_cursor);
+                            try writer.flush();
+                        }
                     }
                 } else if (key.matches('r', .{ .ctrl = true })) {
                     // TODO: history search
