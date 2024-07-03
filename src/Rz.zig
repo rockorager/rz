@@ -254,16 +254,35 @@ pub fn run(self: *Rz) !u8 {
                     const cmd = self.history.nthEntry(history_index.?);
                     zedit.clearRetainingCapacity();
                     try zedit.insertSliceAtCursor(cmd);
-                } else if (key.matches(vaxis.Key.tab, .{})) {
+                } else if (key.matches(vaxis.Key.tab, .{}) or key.matches('n', .{ .ctrl = true })) {
                     if (self.completion) |*completer| {
-                        completer.selectNext();
+                        const line = try completer.selectNext();
+                        zedit.clearRetainingCapacity();
+                        try zedit.insertSliceAtCursor(line);
                     } else {
                         self.completion = Completions.init(self.allocator);
                         try self.completion.?.complete(zedit.buf.items);
                     }
-                } else if (key.matches(vaxis.Key.tab, .{ .shift = true })) {
-                    if (self.completion) |*completer|
-                        completer.selectPrev();
+                    switch (zedit.buf.items.len) {
+                        0 => zedit.hint = "",
+                        else => {
+                            const hint = self.history.findPrefix(zedit.buf.items);
+                            zedit.hint = hint;
+                        },
+                    }
+                } else if (key.matches(vaxis.Key.tab, .{ .shift = true }) or key.matches('p', .{ .ctrl = true })) {
+                    if (self.completion) |*completer| {
+                        const line = try completer.selectPrev();
+                        zedit.clearRetainingCapacity();
+                        try zedit.insertSliceAtCursor(line);
+                    }
+                    switch (zedit.buf.items.len) {
+                        0 => zedit.hint = "",
+                        else => {
+                            const hint = self.history.findPrefix(zedit.buf.items);
+                            zedit.hint = hint;
+                        },
+                    }
                 } else if (key.matches(vaxis.Key.escape, .{})) {
                     if (self.completion) |*cmp| {
                         cmp.deinit();
@@ -440,17 +459,34 @@ const Completions = struct {
     stderr: std.ArrayList(u8),
 
     items: std.ArrayList(Item),
-    idx: usize = 0,
+    idx: ?usize = null,
     scroll: usize = 0,
 
     // a duped copy of the completed line
     completed_line: ?[]const u8 = null,
+    tentative_line: ?[]const u8 = null,
 
     const Item = struct {
         name: []const u8,
         secondary_name: []const u8 = "",
         description: []const u8,
     };
+
+    /// Replaces the last word in the completed line with 'word'. Result is stored in tentative_line
+    fn replaceLastWord(self: *Completions, word: []const u8) ![]const u8 {
+        if (self.tentative_line) |line| {
+            self.allocator.free(line);
+        }
+        var list = std.ArrayList(u8).init(self.allocator);
+        defer list.deinit();
+        if (std.mem.lastIndexOfScalar(u8, self.completed_line.?, ' ')) |idx| {
+            try list.appendSlice(self.completed_line.?[0 .. idx + 1]);
+        }
+        try list.appendSlice(word);
+        try list.append(' ');
+        self.tentative_line = try list.toOwnedSlice();
+        return self.tentative_line.?;
+    }
 
     fn init(allocator: std.mem.Allocator) Completions {
         return .{
@@ -469,35 +505,52 @@ const Completions = struct {
             self.allocator.free(line);
             self.completed_line = null;
         }
+        if (self.tentative_line) |line| {
+            self.allocator.free(line);
+            self.tentative_line = null;
+        }
     }
 
     fn reset(self: *Completions) void {
         self.items.clearAndFree();
         self.stdout.clearAndFree();
         self.stderr.clearAndFree();
-        self.idx = 0;
+        self.idx = null;
         if (self.completed_line) |line| {
             self.allocator.free(line);
             self.completed_line = null;
         }
+        if (self.tentative_line) |line| {
+            self.allocator.free(line);
+            self.tentative_line = null;
+        }
     }
 
-    fn selectNext(self: *Completions) void {
-        self.idx += 1;
-        if (self.idx >= self.items.items.len) {
+    fn selectNext(self: *Completions) ![]const u8 {
+        if (self.idx) |_|
+            self.idx.? += 1
+        else
             self.idx = 0;
+
+        if (self.idx.? >= self.items.items.len) {
+            self.idx = null;
             self.scroll = 0;
+            return self.completed_line.?;
         }
+        return self.replaceLastWord(self.items.items[self.idx.?].name);
     }
 
-    fn selectPrev(self: *Completions) void {
-        if (self.idx == 0) {
+    fn selectPrev(self: *Completions) ![]const u8 {
+        if (self.idx) |idx| {
+            if (idx == 0) {
+                self.idx = null;
+                return self.completed_line.?;
+            }
+            self.idx = idx - 1;
+        } else {
             self.idx = self.items.items.len - 1;
-            return;
         }
-        self.idx -|= 1;
-        if (self.idx < self.scroll)
-            self.scroll = self.idx;
+        return self.replaceLastWord(self.items.items[self.idx.?].name);
     }
 
     fn complete(self: *Completions, line: []const u8) !void {
@@ -506,7 +559,9 @@ const Completions = struct {
     }
 
     fn sameLine(self: *Completions, line: []const u8) bool {
-        const old = self.completed_line orelse return false;
+        const old = self.tentative_line orelse
+            self.completed_line orelse return false;
+
         return std.mem.eql(u8, old, line);
     }
 
@@ -583,20 +638,32 @@ const Completions = struct {
             .x_off = win.width - 1,
         });
 
-        if (self.scroll + win.height <= self.idx) {
-            self.scroll = self.idx -| win.height + 1;
+        if (self.idx) |idx| {
+            // is our selection below the window?
+            if (self.scroll + win.height <= idx) {
+                self.scroll = idx -| win.height + 1;
+            }
+            // did we scroll too far?
+            if (self.scroll + win.height > self.items.items.len) {
+                self.scroll = self.items.items.len -| win.height -| 1;
+            }
+            if (idx < self.scroll) {
+                self.scroll = idx;
+            }
         }
 
         var i: usize = self.scroll;
         while (i < self.items.items.len) : (i += 1) {
-            if (i == self.idx) {
-                _ = try win.printSegment(.{
-                    .text = ">",
-                    .style = .{ .fg = .{ .index = 5 } },
-                }, .{
-                    .row_offset = i - self.scroll,
-                    .col_offset = 1,
-                });
+            if (self.idx) |idx| {
+                if (i == idx) {
+                    _ = try win.printSegment(.{
+                        .text = ">",
+                        .style = .{ .fg = .{ .index = 5 } },
+                    }, .{
+                        .row_offset = i - self.scroll,
+                        .col_offset = 1,
+                    });
+                }
             }
             const item = self.items.items[i];
             const name_result = try name_win.printSegment(.{ .text = item.name }, .{
