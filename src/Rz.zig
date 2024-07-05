@@ -55,6 +55,19 @@ pub fn init(allocator: std.mem.Allocator) !Rz {
         try env.put("PWD", pwd);
     }
 
+    // freed on deinit
+    const history_path: []const u8 = blk: {
+        if (env.get("XDG_DATA_HOME")) |data| {
+            const data_dir = try std.fs.openDirAbsolute(data, .{});
+            try data_dir.makePath("rz");
+            break :blk try data_dir.realpathAlloc(allocator, "rz/history");
+        } else if (env.get("HOME")) |home| {
+            const home_dir = try std.fs.openDirAbsolute(home, .{});
+            try home_dir.makePath(".local/share/rz");
+            break :blk try home_dir.realpathAlloc(allocator, ".local/share/rz/history");
+        } else return error.NoHOME;
+    };
+
     // TODO: pid
 
     return .{
@@ -64,7 +77,7 @@ pub fn init(allocator: std.mem.Allocator) !Rz {
         .env = env,
         .history = .{
             .allocator = allocator,
-            .file = "/home/tim/.local/share/rz/history",
+            .file = history_path,
             .entries = std.ArrayList(History.Entry).init(allocator),
         },
     };
@@ -77,6 +90,7 @@ pub fn deinit(self: *Rz) void {
     if (self.prompt_str) |str| {
         self.allocator.free(str);
     }
+    self.allocator.free(self.history.file);
     self.history.deinit();
     if (self.completion) |*cmp| {
         cmp.deinit();
