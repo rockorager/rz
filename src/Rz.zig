@@ -184,6 +184,7 @@ pub fn run(self: *Rz) !u8 {
                         }
                         try any.writeAll(vaxis.ctlseqs.sgr_reset);
                         try writer.flush();
+                        try self.clearInternalScreen();
                         resetTty(self.tty);
                     }
 
