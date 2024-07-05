@@ -121,11 +121,8 @@ pub fn run(self: *Rz) !u8 {
             ) catch continue;
             const src = try file.readToEndAlloc(self.allocator, 1_000_000);
             defer self.allocator.free(src);
-            const fd = try std.posix.dup(self.tty.fd);
+            // TODO: config files should be ran in a sandbox - not outputting to stdout
             _ = try interpreter.exec(self.allocator, src, &self.env);
-            try std.posix.dup2(fd, std.posix.STDOUT_FILENO);
-            self.tty.fd = fd;
-            try makeRaw(self.tty);
         }
     }
     var loop: vaxis.Loop(Event) = .{
