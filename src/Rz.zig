@@ -607,11 +607,13 @@ const Completions = struct {
             var iter = std.mem.splitScalar(u8, l, '\t');
             const name = iter.first();
             const description = iter.next() orelse "";
-            if (description.len == 0)
+            if (description.len == 0) {
                 try self.items.append(.{
                     .name = name,
                     .description = description,
                 });
+                continue;
+            }
             for (self.items.items) |*item| {
                 if (item.name.len > 0 and item.name[0] == '-' and std.mem.eql(u8, item.description, description)) {
                     item.secondary_name = name;
