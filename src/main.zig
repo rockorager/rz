@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const vaxis = @import("vaxis");
 const Rz = @import("Rz.zig");
 
@@ -27,10 +28,12 @@ pub fn logFn(
             bw.flush() catch return;
         },
         else => {
+            const lf = log_file orelse return;
+
             const level_txt = comptime level.asText();
             const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
 
-            var bw = std.io.bufferedWriter(log_file.writer());
+            var bw = std.io.bufferedWriter(lf.writer());
             const writer = bw.writer();
             writer.print(level_txt ++ prefix2 ++ format ++ "\n", logargs) catch return;
             bw.flush() catch return;
@@ -38,7 +41,7 @@ pub fn logFn(
     }
 }
 
-var log_file: std.fs.File = undefined;
+var log_file: ?std.fs.File = null;
 
 pub var args: struct {
     /// prints each executed function, builtin, or command to stderr prior to executing
@@ -46,8 +49,9 @@ pub var args: struct {
 } = .{};
 
 pub fn main() !u8 {
-    log_file = try std.fs.cwd().createFile("rz.log", .{ .truncate = true });
-    defer log_file.close();
+    if (builtin.mode == .Debug)
+        log_file = try std.fs.cwd().createFile("rz.log", .{ .truncate = true });
+    defer if (log_file) |lf| lf.close();
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
