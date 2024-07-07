@@ -19,6 +19,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("vaxis", vaxis_dep.module("vaxis"));
 
     b.installArtifact(exe);
+    b.installFile("default_config.rz", "share/rz/config.rz");
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());

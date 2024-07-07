@@ -1,0 +1,30 @@
+# Default prompt
+fn prompt {
+    reset='\x1b[m'
+    blue='\x1b[34m'
+    purple='\x1b[35m'
+
+    # Replace $HOME with '~' and save in $pwd
+    pwd=`{pwd | sed 's|^'$home'|~|'}
+
+    user=`{whoami}
+    hostname=`{hostname}
+
+    user_prefix='['^$user^'@'^$hostname^']:'
+
+    # Concatenate our line together and save the output in $left
+    left=`{printf $user_prefix^$blue^$pwd^$purple^' > '^$reset}
+
+    # Set $prompt to the string value of $left
+    prompt=$"left
+}
+
+# Colorize ls
+fn ls {
+    builtin ls --color=auto $*
+}
+
+# Better ll
+fn ll {
+    LC_ALL="C" ls -Al --group-directories-first --human-readable
+}
