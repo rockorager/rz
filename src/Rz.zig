@@ -60,11 +60,11 @@ pub fn init(allocator: std.mem.Allocator) !Rz {
         if (env.get("XDG_DATA_HOME")) |data| {
             const data_dir = try std.fs.openDirAbsolute(data, .{});
             try data_dir.makePath("rz");
-            break :blk try data_dir.realpathAlloc(allocator, "rz/history");
+            break :blk try std.fs.path.join(allocator, &.{ data, "rz", "history" });
         } else if (env.get("HOME")) |home| {
             const home_dir = try std.fs.openDirAbsolute(home, .{});
             try home_dir.makePath(".local/share/rz");
-            break :blk try home_dir.realpathAlloc(allocator, ".local/share/rz/history");
+            break :blk try std.fs.path.join(allocator, &.{ home, ".local", "share", "rz", "history" });
         } else return error.NoHOME;
     };
 
